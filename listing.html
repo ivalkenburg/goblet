@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Index of {{.Path}}</title>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        font-size: 14px;
+        background: #0d1117;
+        color: #c9d1d9;
+        min-height: 100vh;
+      }
+      header {
+        padding: 12px 24px;
+        background: #161b22;
+        border-bottom: 1px solid #30363d;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      header .brand a {
+        font-weight: 700;
+        color: #58a6ff;
+        letter-spacing: -0.3px;
+        text-decoration: none;
+      }
+      header .brand a:hover {
+        text-decoration: underline;
+      }
+      header .sep {
+        color: #484f58;
+        user-select: none;
+      }
+      .crumb {
+        color: #8b949e;
+        font-size: 13px;
+        text-decoration: none;
+      }
+      .crumb:hover {
+        color: #c9d1d9;
+        text-decoration: underline;
+      }
+      .crumb.active {
+        color: #e6edf3;
+        pointer-events: none;
+      }
+      .container {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      h1 {
+        font-size: 16px;
+        font-weight: 500;
+        color: #8b949e;
+        margin: 0 0 20px;
+        word-break: break-all;
+      }
+      h1 strong {
+        color: #e6edf3;
+        font-weight: 600;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      thead th {
+        text-align: left;
+        padding: 6px 12px;
+        color: #8b949e;
+        font-weight: 500;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 1px solid #30363d;
+      }
+      th[data-col] {
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+      }
+      th[data-col]:hover {
+        color: #c9d1d9;
+      }
+      th[data-col].sorted {
+        color: #e6edf3;
+      }
+      .sort-arrow {
+        color: #58a6ff;
+        margin-left: 3px;
+        font-size: 10px;
+      }
+      td {
+        padding: 8px 12px;
+        border-bottom: 1px solid #21262d;
+        vertical-align: middle;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      tbody tr:hover td {
+        background: #161b22;
+      }
+      td.ico-cell {
+        width: 28px;
+        padding: 8px 0 8px 12px;
+      }
+      td.name a {
+        color: #58a6ff;
+        text-decoration: none;
+      }
+      td.name a:hover {
+        text-decoration: underline;
+      }
+      td.name a.dir {
+        color: #79c0ff;
+      }
+      td.name a.parent {
+        color: #8b949e;
+      }
+      td.size {
+        text-align: right;
+        color: #8b949e;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      td.ext {
+        color: #8b949e;
+        white-space: nowrap;
+        font-size: 12px;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+      }
+      td.date {
+        color: #8b949e;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+        padding-left: 24px;
+      }
+      .ico {
+        display: inline-block;
+        width: 18px;
+        text-align: center;
+        font-style: normal;
+        opacity: 0.6;
+      }
+      .empty {
+        color: #484f58;
+        padding: 32px 12px;
+        font-size: 13px;
+      }
+      footer {
+        text-align: center;
+        padding: 32px 0 24px;
+        color: #30363d;
+        font-size: 12px;
+      }
+      .filter-wrap {
+        margin-bottom: 16px;
+      }
+      #filter {
+        width: 100%;
+        max-width: 320px;
+        padding: 6px 10px;
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        color: #c9d1d9;
+        font-size: 13px;
+        outline: none;
+      }
+      #filter:focus {
+        border-color: #58a6ff;
+      }
+      #filter::placeholder {
+        color: #484f58;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="brand"><a href="/">goblet</a></span>
+      {{range .Breadcrumbs}}
+      <span class="sep">/</span>
+      {{if .IsLast}}<span class="crumb active">{{.Name}}</span>{{else}}<a
+        class="crumb"
+        href="{{.Href}}"
+        >{{.Name}}</a
+      >{{end}} {{end}}
+    </header>
+    <div class="container">
+      <h1>Index of <strong>{{.Path}}</strong></h1>
+      <div class="filter-wrap">
+        <input
+          type="search"
+          id="filter"
+          placeholder="Filter by name…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th data-col="type" style="width: 32px" title="Sort by type">
+              <span class="sort-arrow"></span>
+            </th>
+            <th data-col="name">Name<span class="sort-arrow"></span></th>
+            <th data-col="ext">Ext<span class="sort-arrow"></span></th>
+            <th data-col="size" style="text-align: right">
+              Size<span class="sort-arrow"></span>
+            </th>
+            <th data-col="date" style="padding-left: 24px">
+              Modified<span class="sort-arrow"></span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {{if ne .Path "/"}}
+          <tr>
+            <td class="ico-cell"><i class="ico">&#8593;</i></td>
+            <td class="name" colspan="4">
+              <a class="parent" href="../">../</a>
+            </td>
+          </tr>
+          {{end}} {{range .Entries}}
+          <tr
+            data-type="{{if .IsDir}}0{{else}}1{{end}}"
+            data-name="{{.Name}}"
+            data-ext="{{.Ext}}"
+            data-size="{{.SizeBytes}}"
+            data-date="{{.ModTime}}"
+            data-symlink="{{if .IsSymlink}}1{{else}}0{{end}}"
+          >
+            <td class="ico-cell">
+              {{if .IsSymlink}}<i class="ico">&#128279;</i>{{else if .IsDir}}<i
+                class="ico"
+                >&#128193;</i
+              >{{else}}<i class="ico">&#128196;</i>{{end}}
+            </td>
+            <td class="name">
+              {{if .IsDir}}<a class="dir" href="{{.Name}}/">{{.Name}}/</a
+              >{{else}}<a href="{{.Name}}">{{.Name}}</a>{{end}}
+            </td>
+            <td class="ext">{{if .Ext}}{{.Ext}}{{else}}&mdash;{{end}}</td>
+            <td class="size">{{if .Size}}{{.Size}}{{else}}&mdash;{{end}}</td>
+            <td class="date">{{.ModTime}}</td>
+          </tr>
+          {{end}} {{if not .Entries}}
+          <tr>
+            <td colspan="5" class="empty">Empty directory.</td>
+          </tr>
+          {{end}}
+          <tr id="no-results" style="display: none">
+            <td colspan="5" class="empty">No matching entries.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <footer>goblet v{{.Version}}</footer>
+    <script>
+      (function () {
+        var tbody = document.querySelector("tbody");
+        var col = "type",
+          asc = true;
+
+        function sort(newCol) {
+          if (col === newCol) {
+            asc = !asc;
+          } else {
+            col = newCol;
+            asc = true;
+          }
+          render();
+        }
+
+        function render() {
+          document.querySelectorAll("th[data-col]").forEach(function (th) {
+            var arrow = th.querySelector(".sort-arrow");
+            if (th.dataset.col === col) {
+              th.classList.add("sorted");
+              arrow.textContent = asc ? " ▲" : " ▼";
+            } else {
+              th.classList.remove("sorted");
+              arrow.textContent = "";
+            }
+          });
+
+          var rows = Array.from(tbody.querySelectorAll("tr[data-name]"));
+          rows.sort(function (a, b) {
+            var av = a.dataset[col],
+              bv = b.dataset[col];
+            var cmp;
+            if (col === "size") {
+              cmp = (parseInt(av, 10) || 0) - (parseInt(bv, 10) || 0);
+            } else {
+              cmp = av.localeCompare(bv, undefined, {
+                sensitivity: "base",
+                numeric: col === "name",
+              });
+            }
+            return asc ? cmp : -cmp;
+          });
+          rows.forEach(function (r) {
+            tbody.appendChild(r);
+          });
+        }
+
+        document.querySelectorAll("th[data-col]").forEach(function (th) {
+          th.addEventListener("click", function () {
+            sort(th.dataset.col);
+          });
+        });
+
+        var filterInput = document.getElementById("filter");
+        var noResults = document.getElementById("no-results");
+
+        filterInput.addEventListener("input", function () {
+          var q = filterInput.value.toLowerCase();
+          var rows = tbody.querySelectorAll("tr[data-name]");
+          var visible = 0;
+          rows.forEach(function (r) {
+            var match = !q || r.dataset.name.toLowerCase().includes(q);
+            r.style.display = match ? "" : "none";
+            if (match) visible++;
+          });
+          noResults.style.display = q && visible === 0 ? "" : "none";
+        });
+
+        render();
+      })();
+    </script>
+  </body>
+</html>
