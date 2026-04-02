@@ -112,7 +112,7 @@ func TestCORSMiddleware_SetsHeaders(t *testing.T) {
 	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Errorf("expected Access-Control-Allow-Origin *, got %q", got)
 	}
-	if got := rr.Header().Get("Access-Control-Allow-Methods"); got != "GET, HEAD, OPTIONS" {
+	if got := rr.Header().Get("Access-Control-Allow-Methods"); got != "GET, HEAD, OPTIONS, POST, PUT, DELETE, PATCH" {
 		t.Errorf("unexpected Access-Control-Allow-Methods: %q", got)
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Headers"); got == "" {

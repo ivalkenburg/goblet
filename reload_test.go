@@ -252,7 +252,7 @@ func TestReloader_BroadcastDropsSlowClient(t *testing.T) {
 
 func TestNewReloader_WatchesRootDirectory(t *testing.T) {
 	dir := newTestDir(t)
-	r, err := newReloader(dir)
+	r, err := newReloader(dir, nil)
 	if err != nil {
 		t.Fatalf("newReloader failed: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestNewReloader_WatchesSubdirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, err := newReloader(dir)
+	r, err := newReloader(dir, nil)
 	if err != nil {
 		t.Fatalf("newReloader failed: %v", err)
 	}
@@ -298,6 +298,68 @@ func TestNewReloader_WatchesSubdirectory(t *testing.T) {
 	case <-ch:
 	case <-time.After(3 * time.Second):
 		t.Error("no broadcast received after change in subdirectory")
+	}
+}
+
+func TestNewReloader_ExcludedDirNotWatched(t *testing.T) {
+	dir := newTestDir(t)
+	excluded := filepath.Join(dir, "node_modules")
+	if err := os.Mkdir(excluded, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := newReloader(dir, []string{"node_modules"})
+	if err != nil {
+		t.Fatalf("newReloader failed: %v", err)
+	}
+	defer r.shutdown()
+
+	ch := make(chan struct{}, 1)
+	r.mu.Lock()
+	r.clients[ch] = struct{}{}
+	r.mu.Unlock()
+
+	if err := os.WriteFile(filepath.Join(excluded, "change.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-ch:
+		t.Error("should not broadcast for changes inside an excluded directory")
+	case <-time.After(2 * time.Second):
+		// expected: no broadcast
+	}
+}
+
+func TestNewReloader_NonExcludedSubdirStillWatched(t *testing.T) {
+	dir := newTestDir(t)
+	if err := os.Mkdir(filepath.Join(dir, "node_modules"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "src")
+	if err := os.Mkdir(src, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := newReloader(dir, []string{"node_modules"})
+	if err != nil {
+		t.Fatalf("newReloader failed: %v", err)
+	}
+	defer r.shutdown()
+
+	ch := make(chan struct{}, 1)
+	r.mu.Lock()
+	r.clients[ch] = struct{}{}
+	r.mu.Unlock()
+
+	if err := os.WriteFile(filepath.Join(src, "main.js"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Error("no broadcast received for change in non-excluded directory")
 	}
 }
 

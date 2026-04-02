@@ -43,7 +43,7 @@ func Start(cfg *Config) error {
 	var r *reloader
 	if cfg.Watch {
 		var werr error
-		r, werr = newReloader(cfg.Root)
+		r, werr = newReloader(cfg.Root, cfg.Exclude)
 		if werr != nil {
 			fmt.Fprintf(os.Stderr, "warning: live reload disabled: %v\n", werr)
 			cfg.Watch = false

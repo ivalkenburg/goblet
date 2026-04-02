@@ -1,8 +1,8 @@
 package main
 
 import (
-	_ "embed"
 	"cmp"
+	_ "embed"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -47,13 +47,13 @@ func buildBreadcrumbs(urlPath string) []breadcrumb {
 	}
 	parts := strings.Split(strings.Trim(urlPath, "/"), "/")
 	crumbs := make([]breadcrumb, 0, len(parts))
-	href := ""
+	var href strings.Builder
 	for _, p := range parts {
 		if p == "" {
 			continue
 		}
-		href += "/" + p
-		crumbs = append(crumbs, breadcrumb{Name: p, Href: href + "/"})
+		href.WriteString("/" + p)
+		crumbs = append(crumbs, breadcrumb{Name: p, Href: href.String() + "/"})
 	}
 	if len(crumbs) > 0 {
 		crumbs[len(crumbs)-1].IsLast = true
@@ -100,7 +100,7 @@ func serveDirectoryListing(w http.ResponseWriter, _ *http.Request, dir, urlPath 
 		}
 		if e.IsDir() {
 			if cfg.DirSize {
-				n := dirTotalSize(filepath.Join(dir, e.Name()))
+				n := dirTotalSize(filepath.Join(dir, e.Name()), cfg.Symlinks)
 				de.SizeBytes = n
 				de.Size = humanSize(n)
 			}
@@ -135,10 +135,13 @@ func serveDirectoryListing(w http.ResponseWriter, _ *http.Request, dir, urlPath 
 	}
 }
 
-func dirTotalSize(dir string) int64 {
+func dirTotalSize(dir string, symlinks bool) int64 {
 	var total int64
 	filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
+			return nil
+		}
+		if !symlinks && d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		if fi, err := d.Info(); err == nil {

@@ -32,20 +32,26 @@ type reloader struct {
 	clients map[chan struct{}]struct{}
 	watcher *fsnotify.Watcher
 	done    chan struct{} // closed by shutdown() to unblock all SSE handlers
+	exclude []string
 }
 
 // newReloader starts an fsnotify watcher on root (recursively) and returns
 // a reloader that broadcasts to all SSE clients when files change.
-func newReloader(root string) (*reloader, error) {
+// Directories whose names match any of the exclude patterns are skipped.
+func newReloader(root string, exclude []string) (*reloader, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("live reload: %w", err)
 	}
 
 	// Add the root and every subdirectory so nested changes are caught.
+	// Skip directories that match an exclude pattern (e.g. node_modules).
 	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil
+		}
+		if path != root && matchesExclude(d.Name(), exclude) {
+			return fs.SkipDir
 		}
 		return w.Add(path)
 	}); err != nil {
@@ -57,6 +63,7 @@ func newReloader(root string) (*reloader, error) {
 		clients: make(map[chan struct{}]struct{}),
 		watcher: w,
 		done:    make(chan struct{}),
+		exclude: exclude,
 	}
 	go r.watch(w)
 	return r, nil
@@ -71,10 +78,13 @@ func (r *reloader) watch(w *fsnotify.Watcher) {
 			if !ok {
 				return
 			}
-			// Watch newly created directories so they are covered too.
+			// Watch newly created directories so they are covered too,
+			// unless they match an exclude pattern.
 			if event.Has(fsnotify.Create) {
 				if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
-					_ = w.Add(event.Name)
+					if !matchesExclude(filepath.Base(event.Name), r.exclude) {
+						_ = w.Add(event.Name)
+					}
 				}
 			}
 			// Only reload on content-changing events; ignore Chmod and reads.

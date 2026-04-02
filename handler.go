@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net"
 	"net/http"
@@ -116,7 +117,7 @@ func clientIP(r *http.Request) string {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST, PUT, DELETE, PATCH")
 		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -144,7 +145,8 @@ func basicAuthMiddleware(next http.Handler, username, password string) http.Hand
 	const realm = `Basic realm="goblet"`
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
-		if !ok || u != username || p != password {
+		if !ok || subtle.ConstantTimeCompare([]byte(u), []byte(username)) != 1 ||
+			subtle.ConstantTimeCompare([]byte(p), []byte(password)) != 1 {
 			w.Header().Set("WWW-Authenticate", realm)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return

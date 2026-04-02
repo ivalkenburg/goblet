@@ -353,7 +353,7 @@ func TestServeDirectoryListing_SymlinkHasIndicator(t *testing.T) {
 
 func TestDirTotalSize_Empty(t *testing.T) {
 	dir := newListingDir(t)
-	if got := dirTotalSize(dir); got != 0 {
+	if got := dirTotalSize(dir, false); got != 0 {
 		t.Errorf("expected 0 for empty dir, got %d", got)
 	}
 }
@@ -361,7 +361,7 @@ func TestDirTotalSize_Empty(t *testing.T) {
 func TestDirTotalSize_SingleFile(t *testing.T) {
 	dir := newListingDir(t)
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0644)
-	if got := dirTotalSize(dir); got != 5 {
+	if got := dirTotalSize(dir, false); got != 5 {
 		t.Errorf("expected 5, got %d", got)
 	}
 }
@@ -372,8 +372,22 @@ func TestDirTotalSize_Nested(t *testing.T) {
 	os.Mkdir(sub, 0755)
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("ab"), 0644)
 	os.WriteFile(filepath.Join(sub, "b.txt"), []byte("cde"), 0644)
-	if got := dirTotalSize(dir); got != 5 {
+	if got := dirTotalSize(dir, false); got != 5 {
 		t.Errorf("expected 5 (2+3), got %d", got)
+	}
+}
+
+func TestDirTotalSize_SkipsSymlinksWhenDisabled(t *testing.T) {
+	dir := newListingDir(t)
+	target := filepath.Join(dir, "real.txt")
+	os.WriteFile(target, []byte("hello"), 0644)
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	// With symlinks disabled only real.txt (5 bytes) should be counted.
+	if got := dirTotalSize(dir, false); got != 5 {
+		t.Errorf("expected 5 (symlink excluded), got %d", got)
 	}
 }
 
