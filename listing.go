@@ -5,8 +5,8 @@ import (
 	_ "embed"
 	"fmt"
 	"html/template"
-	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,6 +26,7 @@ type breadcrumb struct {
 
 type dirEntry struct {
 	Name      string
+	Href      string
 	IsDir     bool
 	IsSymlink bool
 	Ext       string
@@ -52,7 +53,7 @@ func buildBreadcrumbs(urlPath string) []breadcrumb {
 		if p == "" {
 			continue
 		}
-		href.WriteString("/" + p)
+		href.WriteString("/" + url.PathEscape(p))
 		crumbs = append(crumbs, breadcrumb{Name: p, Href: href.String() + "/"})
 	}
 	if len(crumbs) > 0 {
@@ -73,19 +74,21 @@ func serveDirectoryListing(w http.ResponseWriter, _ *http.Request, dir, urlPath 
 		if cfg.NoDotfiles && strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		if cfg.NoDirs && e.IsDir() {
-			continue
-		}
 		if matchesExclude(e.Name(), cfg.Exclude) {
-			continue
-		}
-		fi, err := e.Info()
-		if err != nil {
 			continue
 		}
 		isSymlink := e.Type()&os.ModeSymlink != 0
 		// Hide symlinks when the server is not configured to follow them.
 		if isSymlink && !cfg.Symlinks {
+			continue
+		}
+		var fi os.FileInfo
+		if isSymlink {
+			fi, err = os.Stat(filepath.Join(dir, e.Name()))
+		} else {
+			fi, err = e.Info()
+		}
+		if err != nil || (cfg.NoDirs && fi.IsDir()) {
 			continue
 		}
 		modTime := fi.ModTime()
@@ -94,11 +97,12 @@ func serveDirectoryListing(w http.ResponseWriter, _ *http.Request, dir, urlPath 
 		}
 		de := dirEntry{
 			Name:      e.Name(),
-			IsDir:     e.IsDir(),
+			Href:      url.PathEscape(e.Name()),
+			IsDir:     fi.IsDir(),
 			IsSymlink: isSymlink,
 			ModTime:   modTime.Format("2006-01-02 15:04"),
 		}
-		if e.IsDir() {
+		if fi.IsDir() {
 			if cfg.DirSize {
 				n := dirTotalSize(filepath.Join(dir, e.Name()), cfg.Symlinks)
 				de.SizeBytes = n
@@ -111,7 +115,7 @@ func serveDirectoryListing(w http.ResponseWriter, _ *http.Request, dir, urlPath 
 				de.Ext = e.Name()[i+1:]
 			}
 		}
-		if e.IsDir() {
+		if fi.IsDir() {
 			dirs = append(dirs, de)
 		} else {
 			files = append(files, de)
@@ -137,18 +141,35 @@ func serveDirectoryListing(w http.ResponseWriter, _ *http.Request, dir, urlPath 
 
 func dirTotalSize(dir string, symlinks bool) int64 {
 	var total int64
-	filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+	seen := make(map[string]bool)
+	var walk func(string)
+	walk = func(path string) {
+		real, err := filepath.EvalSymlinks(path)
+		if err != nil || seen[real] {
+			return
 		}
-		if !symlinks && d.Type()&os.ModeSymlink != 0 {
-			return nil
+		seen[real] = true
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return
 		}
-		if fi, err := d.Info(); err == nil {
-			total += fi.Size()
+		for _, e := range entries {
+			name := filepath.Join(path, e.Name())
+			if e.Type()&os.ModeSymlink != 0 && !symlinks {
+				continue
+			}
+			fi, err := os.Stat(name)
+			if err != nil {
+				continue
+			}
+			if fi.IsDir() {
+				walk(name)
+			} else {
+				total += fi.Size()
+			}
 		}
-		return nil
-	})
+	}
+	walk(dir)
 	return total
 }
 

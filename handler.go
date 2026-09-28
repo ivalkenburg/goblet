@@ -77,6 +77,8 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 func loggingMiddleware(next http.Handler, cfg *Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -171,45 +173,63 @@ func matchesExclude(name string, patterns []string) bool {
 	return false
 }
 
+// fileInfo checks every component, since Lstat on the final path alone would
+// follow symlinks in parent directories. It also applies the visibility rules
+// to fallback files such as about.html and index.html.
+func fileInfo(cfg *Config, fsPath string) (os.FileInfo, bool, error) {
+	rel, err := filepath.Rel(cfg.Root, fsPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, true, nil
+	}
+	if rel == "." {
+		fi, err := os.Stat(cfg.Root)
+		return fi, false, err
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	current := cfg.Root
+	for i, part := range parts {
+		if (cfg.NoDotfiles && strings.HasPrefix(part, ".")) || matchesExclude(part, cfg.Exclude) {
+			return nil, true, nil
+		}
+		current = filepath.Join(current, part)
+		fi, err := os.Lstat(current)
+		if err != nil {
+			return nil, false, err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			if !cfg.Symlinks {
+				return nil, true, nil
+			}
+			fi, err = os.Stat(current)
+			if err != nil {
+				return nil, false, err
+			}
+		}
+		if cfg.NoDirs && i < len(parts)-1 && fi.IsDir() {
+			return nil, true, nil
+		}
+		if i == len(parts)-1 {
+			return fi, false, nil
+		}
+	}
+	return nil, true, nil
+}
+
 func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// path.Clean resolves ".." so callers cannot escape the root.
 	urlPath := path.Clean("/" + r.URL.Path)
 
-	// Deny access to dotfiles when configured.
-	if fh.cfg.NoDotfiles {
-		for seg := range strings.SplitSeq(urlPath, "/") {
-			if len(seg) > 0 && seg[0] == '.' {
-				http.NotFound(w, r)
-				return
-			}
-		}
-	}
-
-	// Deny access to any path segment matching an --exclude pattern.
-	if len(fh.cfg.Exclude) > 0 {
-		for seg := range strings.SplitSeq(urlPath, "/") {
-			if seg != "" && matchesExclude(seg, fh.cfg.Exclude) {
-				http.NotFound(w, r)
-				return
-			}
-		}
-	}
-
-	fsPath := filepath.Join(fh.cfg.Root, filepath.FromSlash(urlPath))
-
-	fi, err := os.Lstat(fsPath)
-	if err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		if !fh.cfg.Symlinks {
-			http.NotFound(w, r)
-			return
-		}
-		fi, err = os.Stat(fsPath) // follow the symlink
+	fsPath := filepath.Join(fh.cfg.Root, filepath.FromSlash(strings.TrimPrefix(urlPath, "/")))
+	fi, denied, err := fileInfo(fh.cfg, fsPath)
+	if denied {
+		http.NotFound(w, r)
+		return
 	}
 	if os.IsNotExist(err) {
 		// Try appending the default extension (e.g. /about → /about.html).
 		if fh.cfg.Ext != "" {
 			candidate := fsPath + "." + fh.cfg.Ext
-			if ci, err2 := os.Stat(candidate); err2 == nil && !ci.IsDir() {
+			if ci, blocked, err2 := fileInfo(fh.cfg, candidate); !blocked && err2 == nil && !ci.IsDir() {
 				serveContent(w, r, candidate, ci)
 				return
 			}
@@ -217,13 +237,13 @@ func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// SPA fallback: serve root index.html so client-side routing works.
 		if fh.cfg.SPA {
 			idx := filepath.Join(fh.cfg.Root, "index.html")
-			if idxFi, err2 := os.Stat(idx); err2 == nil && !idxFi.IsDir() {
+			if idxFi, blocked, err2 := fileInfo(fh.cfg, idx); !blocked && err2 == nil && !idxFi.IsDir() {
 				serveContent(w, r, idx, idxFi)
 				return
 			}
 		}
 		// Serve a custom 404 page if present in the root.
-		if p404 := filepath.Join(fh.cfg.Root, "404.html"); fileExists(p404) {
+		if p404 := filepath.Join(fh.cfg.Root, "404.html"); allowedFile(fh.cfg, p404) {
 			if content, err := os.ReadFile(p404); err == nil {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusNotFound)
@@ -253,7 +273,7 @@ func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Prefer index.html over directory listing.
-		if idxFi, err2 := os.Stat(filepath.Join(fsPath, "index.html")); err2 == nil && !idxFi.IsDir() {
+		if idxFi, blocked, err2 := fileInfo(fh.cfg, filepath.Join(fsPath, "index.html")); !blocked && err2 == nil && !idxFi.IsDir() {
 			serveContent(w, r, filepath.Join(fsPath, "index.html"), idxFi)
 			return
 		}
@@ -282,7 +302,7 @@ func serveContent(w http.ResponseWriter, r *http.Request, fsPath string, fi os.F
 	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
 }
 
-func fileExists(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && !fi.IsDir()
+func allowedFile(cfg *Config, p string) bool {
+	fi, blocked, err := fileInfo(cfg, p)
+	return !blocked && err == nil && !fi.IsDir()
 }

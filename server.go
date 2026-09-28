@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -27,7 +28,7 @@ func Start(cfg *Config) error {
 		return fmt.Errorf("--username and --password must both be provided together")
 	}
 
-	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", cfg.Address, cfg.Port))
+	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Address, strconv.Itoa(cfg.Port)))
 	if err != nil {
 		return fmt.Errorf("cannot listen on port %d: %w", cfg.Port, err)
 	}
@@ -64,11 +65,12 @@ func Start(cfg *Config) error {
 	}
 
 	if cfg.OpenBrowser {
-		go openBrowser(fmt.Sprintf("%s://127.0.0.1:%d", scheme, port))
+		go openBrowser(fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(browserHost(cfg.Address), strconv.Itoa(port))))
 	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -81,6 +83,9 @@ func Start(cfg *Config) error {
 
 	select {
 	case err := <-serveErr:
+		if r != nil {
+			r.shutdown()
+		}
 		if err != http.ErrServerClosed {
 			return err
 		}
@@ -105,10 +110,20 @@ func onOff(enabled bool) string {
 	return "disabled"
 }
 
+func browserHost(address string) string {
+	if address == "::" {
+		return "::1"
+	}
+	if address == "" || address == "0.0.0.0" {
+		return "127.0.0.1"
+	}
+	return address
+}
+
 func printBanner(cfg *Config, scheme string, port int) {
 	fmt.Printf("\ngoblet v%s — serving %q\n\n", version, cfg.Root)
-	fmt.Printf("  %s://127.0.0.1:%d\n", scheme, port)
-	if cfg.Address == "" {
+	fmt.Printf("  %s://%s\n", scheme, net.JoinHostPort(browserHost(cfg.Address), strconv.Itoa(port)))
+	if cfg.Address == "" || cfg.Address == "0.0.0.0" {
 		if addrs, err := localAddresses(); err == nil {
 			for _, addr := range addrs {
 				fmt.Printf("  %s://%s:%d\n", scheme, addr, port)

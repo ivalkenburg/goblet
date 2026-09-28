@@ -66,7 +66,7 @@ goblet ./project --exclude '*.env' --exclude node_modules
 | `--spa` | off | Serve `index.html` for unmatched paths |
 | `-e`, `--ext` | `html` | Extension tried for extensionless URLs |
 | `-d`, `--no-listing` | off | Turn off directory listings |
-| `--no-dirs` | off | Hide directories and return 404 for directory paths |
+| `--no-dirs` | off | Hide directories and return 404 for their URLs and contents |
 | `--no-dotfiles` | off | Hide dotfiles and deny access to them |
 | `--exclude` | | Glob to hide and block; repeatable |
 | `--dir-size` | off | Show total directory sizes in listings |

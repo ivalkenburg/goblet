@@ -249,8 +249,8 @@
               >{{else}}<i class="ico">&#128196;</i>{{end}}
             </td>
             <td class="name">
-              {{if .IsDir}}<a class="dir" href="{{.Name}}/">{{.Name}}/</a
-              >{{else}}<a href="{{.Name}}">{{.Name}}</a>{{end}}
+              {{if .IsDir}}<a class="dir" href="{{.Href}}/">{{.Name}}/</a
+              >{{else}}<a href="{{.Href}}">{{.Name}}</a>{{end}}
             </td>
             <td class="ext">{{if .Ext}}{{.Ext}}{{else}}&mdash;{{end}}</td>
             <td class="size">{{if .Size}}{{.Size}}{{else}}&mdash;{{end}}</td>

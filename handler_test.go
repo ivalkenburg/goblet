@@ -435,30 +435,6 @@ func TestFileHandler_PathTraversalBlocked(t *testing.T) {
 	}
 }
 
-// fileExists
-
-func TestFileExists_ExistingFile(t *testing.T) {
-	dir := newTestDir(t)
-	p := filepath.Join(dir, "test.txt")
-	os.WriteFile(p, []byte("x"), 0644)
-	if !fileExists(p) {
-		t.Error("expected fileExists to return true for existing file")
-	}
-}
-
-func TestFileExists_NonExistentFile(t *testing.T) {
-	if fileExists("/tmp/goblet-nonexistent-file-xyz") {
-		t.Error("expected fileExists to return false for non-existent file")
-	}
-}
-
-func TestFileExists_Directory(t *testing.T) {
-	dir := newTestDir(t)
-	if fileExists(dir) {
-		t.Error("expected fileExists to return false for a directory")
-	}
-}
-
 // symlink
 
 func makeSymlink(t *testing.T, target, link string) {
@@ -533,6 +509,61 @@ func TestFileHandler_Symlink_ToDir_Followed(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected 200 for symlink-to-dir when following enabled, got %d", rr.Code)
+	}
+}
+
+func TestFileHandler_IntermediateSymlinkBlocked(t *testing.T) {
+	dir := newTestDir(t)
+	target := newTestDir(t)
+	os.WriteFile(filepath.Join(target, "secret.txt"), []byte("secret"), 0644)
+	makeSymlink(t, target, filepath.Join(dir, "linked"))
+
+	for _, url := range []string{"/linked/secret.txt", "/linked/missing"} {
+		rr := httptest.NewRecorder()
+		(&fileHandler{cfg: &Config{Root: dir, SPA: true}}).ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("%s: expected 404, got %d", url, rr.Code)
+		}
+	}
+}
+
+func TestFileHandler_FallbacksRespectVisibility(t *testing.T) {
+	dir := newTestDir(t)
+	os.WriteFile(filepath.Join(dir, "about.html"), []byte("about"), 0644)
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("index"), 0644)
+	cfg := &Config{Root: dir, Ext: "html", SPA: true, Exclude: []string{"*.html"}}
+	for _, url := range []string{"/about", "/unknown", "/"} {
+		rr := httptest.NewRecorder()
+		(&fileHandler{cfg: cfg}).ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
+		if strings.Contains(rr.Body.String(), "about") || strings.Contains(rr.Body.String(), "index") {
+			t.Errorf("%s exposed excluded HTML", url)
+		}
+	}
+}
+
+func TestFileHandler_FallbackSymlinksBlocked(t *testing.T) {
+	dir := newTestDir(t)
+	target := filepath.Join(dir, "target.html")
+	os.WriteFile(target, []byte("target content"), 0644)
+	makeSymlink(t, target, filepath.Join(dir, "about.html"))
+	makeSymlink(t, target, filepath.Join(dir, "index.html"))
+	for _, url := range []string{"/about", "/missing", "/"} {
+		rr := httptest.NewRecorder()
+		(&fileHandler{cfg: &Config{Root: dir, Ext: "html", SPA: true}}).ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
+		if strings.Contains(rr.Body.String(), "target content") {
+			t.Errorf("%s exposed symlink target", url)
+		}
+	}
+}
+
+func TestFileHandler_NoDirsBlocksNestedFiles(t *testing.T) {
+	dir := newTestDir(t)
+	os.Mkdir(filepath.Join(dir, "sub"), 0755)
+	os.WriteFile(filepath.Join(dir, "sub", "file.txt"), []byte("hidden"), 0644)
+	rr := httptest.NewRecorder()
+	(&fileHandler{cfg: &Config{Root: dir, NoDirs: true}}).ServeHTTP(rr, httptest.NewRequest("GET", "/sub/file.txt", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for nested file, got %d", rr.Code)
 	}
 }
 

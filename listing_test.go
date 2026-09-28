@@ -67,6 +67,13 @@ func TestBuildBreadcrumbs_TrailingSlash(t *testing.T) {
 	}
 }
 
+func TestBuildBreadcrumbs_EscapesSpecialCharacters(t *testing.T) {
+	crumbs := buildBreadcrumbs("/a#b/c?d")
+	if got := crumbs[1].Href; got != "/a%23b/c%3Fd/" {
+		t.Fatalf("escaped breadcrumb href = %q", got)
+	}
+}
+
 // humanSize
 
 func TestHumanSize_Bytes(t *testing.T) {
@@ -145,6 +152,16 @@ func TestServeDirectoryListing_ShowsFiles(t *testing.T) {
 
 	if !strings.Contains(rr.Body.String(), "readme.txt") {
 		t.Error("listing should contain 'readme.txt'")
+	}
+}
+
+func TestServeDirectoryListing_EscapesFileLink(t *testing.T) {
+	dir := newListingDir(t)
+	os.WriteFile(filepath.Join(dir, "a#b?.txt"), []byte("data"), 0644)
+	rr := httptest.NewRecorder()
+	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{})
+	if !strings.Contains(rr.Body.String(), `href="a%23b%3F.txt"`) {
+		t.Fatalf("special filename was not URL escaped in listing")
 	}
 }
 
@@ -388,6 +405,35 @@ func TestDirTotalSize_SkipsSymlinksWhenDisabled(t *testing.T) {
 	// With symlinks disabled only real.txt (5 bytes) should be counted.
 	if got := dirTotalSize(dir, false); got != 5 {
 		t.Errorf("expected 5 (symlink excluded), got %d", got)
+	}
+}
+
+func TestDirTotalSize_FollowsSymlinksWithoutCycles(t *testing.T) {
+	dir := newListingDir(t)
+	sub := filepath.Join(dir, "sub")
+	os.Mkdir(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "data"), []byte("hello"), 0644)
+	if err := os.Symlink(sub, filepath.Join(dir, "linked")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	os.Symlink(dir, filepath.Join(sub, "loop"))
+	if got := dirTotalSize(filepath.Join(dir, "linked"), true); got != 5 {
+		t.Fatalf("expected 5 bytes through symlink with cycle, got %d", got)
+	}
+}
+
+func TestServeDirectoryListing_SymlinkDirectory(t *testing.T) {
+	dir := newListingDir(t)
+	sub := filepath.Join(dir, "sub")
+	os.Mkdir(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "data"), []byte("hello"), 0644)
+	if err := os.Symlink(sub, filepath.Join(dir, "linked")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{Symlinks: true, DirSize: true})
+	if !strings.Contains(rr.Body.String(), `href="linked/"`) || !strings.Contains(rr.Body.String(), `data-size="5"`) {
+		t.Fatalf("symlinked directory should have directory link and size")
 	}
 }
 

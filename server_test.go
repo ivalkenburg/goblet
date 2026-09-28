@@ -114,7 +114,6 @@ func TestStart_ServesAndShutsDown(t *testing.T) {
 	}
 }
 
-
 func TestStart_RandomPort_Binds(t *testing.T) {
 	dir := newTestDir(t)
 	cfg := &Config{Root: dir, Port: 0, Address: "127.0.0.1", Silent: true}
@@ -191,6 +190,14 @@ func TestPrintBanner_ContainsPort(t *testing.T) {
 	out := captureBanner(cfg, "http")
 	if !strings.Contains(out, "9090") {
 		t.Errorf("banner should contain port number, got:\n%s", out)
+	}
+}
+
+func TestPrintBanner_UsesBoundAddress(t *testing.T) {
+	cfg := &Config{Root: ".", Port: 9090, Address: "::1"}
+	out := captureBanner(cfg, "http")
+	if !strings.Contains(out, "http://[::1]:9090") {
+		t.Fatalf("banner should show the bound IPv6 address, got:\n%s", out)
 	}
 }
 

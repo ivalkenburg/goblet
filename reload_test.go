@@ -146,6 +146,29 @@ func TestLiveReloadMiddleware_SkipsNonHTML(t *testing.T) {
 
 // reloader SSE endpoint
 
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadline time.Time
+	called   bool
+}
+
+func (w *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	w.deadline = deadline
+	w.called = true
+	return nil
+}
+
+func TestReloader_ClearsWriteDeadlineThroughLogger(t *testing.T) {
+	r := &reloader{clients: make(map[chan struct{}]struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	r.ServeHTTP(&statusRecorder{ResponseWriter: w}, httptest.NewRequest("GET", reloadSSEPath, nil).WithContext(ctx))
+	if !w.called || !w.deadline.IsZero() {
+		t.Fatal("SSE did not clear the server write deadline")
+	}
+}
+
 func TestReloader_SSEHeaders(t *testing.T) {
 	r := &reloader{clients: make(map[chan struct{}]struct{})}
 
@@ -361,6 +384,31 @@ func TestNewReloader_NonExcludedSubdirStillWatched(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Error("no broadcast received for change in non-excluded directory")
 	}
+}
+
+func TestNewReloader_WatchesMovedInDirectoryTree(t *testing.T) {
+	dir := newTestDir(t)
+	staging := newTestDir(t)
+	os.MkdirAll(filepath.Join(staging, "top", "nested"), 0755)
+	r, err := newReloader(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.shutdown()
+	if err := os.Rename(filepath.Join(staging, "top"), filepath.Join(dir, "top")); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "top", "nested")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, watched := range r.watcher.WatchList() {
+			if watched == want {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("new nested directory %q was not watched", want)
 }
 
 // printBanner — live reload line

@@ -46,15 +46,7 @@ func newReloader(root string, exclude []string) (*reloader, error) {
 
 	// Add the root and every subdirectory so nested changes are caught.
 	// Skip directories that match an exclude pattern (e.g. node_modules).
-	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
-			return nil
-		}
-		if path != root && matchesExclude(d.Name(), exclude) {
-			return fs.SkipDir
-		}
-		return w.Add(path)
-	}); err != nil {
+	if err := watchTree(w, root, exclude); err != nil {
 		w.Close()
 		return nil, fmt.Errorf("live reload watch: %w", err)
 	}
@@ -69,9 +61,26 @@ func newReloader(root string, exclude []string) (*reloader, error) {
 	return r, nil
 }
 
+func watchTree(w *fsnotify.Watcher, root string, exclude []string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		if path != root && matchesExclude(d.Name(), exclude) {
+			return fs.SkipDir
+		}
+		return w.Add(path)
+	})
+}
+
 func (r *reloader) watch(w *fsnotify.Watcher) {
 	defer w.Close()
 	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		select {
 		case event, ok := <-w.Events:
@@ -83,9 +92,12 @@ func (r *reloader) watch(w *fsnotify.Watcher) {
 			if event.Has(fsnotify.Create) {
 				if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
 					if !matchesExclude(filepath.Base(event.Name), r.exclude) {
-						_ = w.Add(event.Name)
+						_ = watchTree(w, event.Name, r.exclude)
 					}
 				}
+			}
+			if matchesExclude(filepath.Base(event.Name), r.exclude) {
+				continue
 			}
 			// Only reload on content-changing events; ignore Chmod and reads.
 			const mutating = fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
@@ -124,17 +136,20 @@ func (r *reloader) broadcast() {
 
 // ServeHTTP implements the SSE endpoint that browsers connect to.
 func (r *reloader) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	// The server's normal WriteTimeout is for finite file responses. SSE
+	// connections must stay writable across that deadline.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable nginx proxy buffering
 	w.WriteHeader(http.StatusOK)
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
 	flusher.Flush()
 
 	ch := make(chan struct{}, 1)
