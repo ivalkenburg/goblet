@@ -18,18 +18,21 @@ jobs:
     strategy:
       matrix:
         include:
-          - goos: windows
-            goarch: amd64
-            asset_name: goblet-windows-x64.exe
-          - goos: darwin
-            goarch: amd64
-            asset_name: goblet-macos-x64
-          - goos: darwin
-            goarch: arm64
-            asset_name: goblet-macos-arm64
           - goos: linux
             goarch: amd64
-            asset_name: goblet-linux-x64
+            asset_name: goblet-linux-amd64
+          - goos: linux
+            goarch: arm64
+            asset_name: goblet-linux-arm64
+          - goos: darwin
+            goarch: amd64
+            asset_name: goblet-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            asset_name: goblet-darwin-arm64
+          - goos: windows
+            goarch: amd64
+            asset_name: goblet-windows-amd64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -64,9 +67,5 @@ jobs:
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            goblet-windows-x64.exe
-            goblet-macos-x64
-            goblet-macos-arm64
-            goblet-linux-x64
+          files: goblet-*
           generate_release_notes: true

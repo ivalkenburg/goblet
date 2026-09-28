@@ -1,40 +1,41 @@
 # goblet
 
-A fast, zero-config HTTP file server for local development. Inspired by the [`http-server`](https://github.com/http-party/http-server) npm package, built in Go.
+A static file server for local development. Run it in a folder and that folder
+is on `http://localhost:8080`.
+
+It does the same job as the [`http-server`](https://github.com/http-party/http-server)
+npm package, but it's a single Go binary, so you don't need Node installed to
+look at a build folder or share a few files on your network.
 
 ## Features
 
-- **Directory listing** — clean HTML UI with breadcrumb navigation, sorted dirs and files
-- **Gzip compression** — automatic content encoding for supported clients
-- **Cache control** — configurable `Cache-Control` headers, or disabled entirely
-- **Basic authentication** — protect your server with a username and password
-- **TLS/HTTPS** — serve over HTTPS with your own certificate and key
-- **CORS** — add permissive `Access-Control-Allow-Origin: *` headers
-- **SPA mode** — serve `index.html` for all unmatched routes (client-side routing)
-- **Default extension** — resolve `/about` → `/about.html` automatically
-- **Custom 404 page** — place a `404.html` in the root to use it
-- **Dotfile protection** — hide and deny access to dotfiles
-- **Directory blocking** — hide subdirectories from listing and return 404 for any directory path
-- **Directory sizes** — optionally calculate and display total size of each directory in listings
-- **Exclude patterns** — hide and block files/directories by glob pattern (e.g. `*.env`, `node_modules`)
-- **Symlink support** — optionally follow symbolic links
-- **Live reload** — watch for file changes and automatically reload connected browsers
-- **Access logging** — Apache-style logs with IP, method, path, status, and elapsed time
-- **Browser auto-open** — launch the browser automatically on start
-- **Graceful shutdown** — handles `SIGINT`/`SIGTERM` with a 5-second drain
+- Directory listings with breadcrumb navigation
+- Gzip compression and configurable `Cache-Control`
+- Live reload of connected browsers when files change
+- SPA mode, which serves `index.html` for unknown routes
+- Basic auth, HTTPS with your own certificate, and CORS
+- Hiding dotfiles, directories or any glob pattern, such as `*.env` or `node_modules`
+- `/about` resolves to `about.html`, and a `404.html` in the root replaces the default 404 page
+- Apache-style access logs, and opening the browser on start
 
-## Installation
+## Install
 
-**From source:**
+With Homebrew:
 
 ```sh
-go install goblet@latest
+brew install ivalkenburg/tap/goblet
 ```
 
-**Or clone and build:**
+With Go:
 
 ```sh
-git clone https://github.com/yourname/goblet
+go install github.com/ivalkenburg/goblet@latest
+```
+
+From source:
+
+```sh
+git clone https://github.com/ivalkenburg/goblet.git
 cd goblet
 go build -o goblet .
 ```
@@ -45,110 +46,44 @@ go build -o goblet .
 goblet [path] [flags]
 ```
 
-Serve the current directory on port 8080:
+With no path, goblet serves the current directory on port 8080.
 
 ```sh
-goblet
-```
-
-Serve a specific directory:
-
-```sh
-goblet ./dist
-```
-
-Serve on a different port:
-
-```sh
-goblet -p 3000
-```
-
-## Flags
-
-| Flag            | Short | Default    | Description                                                     |
-| --------------- | ----- | ---------- | --------------------------------------------------------------- |
-| `--port`        | `-p`  | `8080`     | Port to listen on (`0` picks a random free port)                |
-| `--address`     | `-a`  | _(all)_    | Address to bind to                                              |
-| `--no-listing`  | `-d`  | `false`    | Disable directory listing                                       |
-| `--silent`      | `-s`  | `false`    | Suppress all log output                                         |
-| `--no-gzip`     |       | `false`    | Disable gzip compression                                        |
-| `--cache`       | `-c`  | `-1`       | Cache `max-age` in seconds (`-1` disables caching)              |
-| `--username`    |       |            | Username for basic auth (requires `--password`)                 |
-| `--password`    |       |            | Password for basic auth (requires `--username`)                 |
-| `--tls`         | `-S`  | `false`    | Enable TLS/HTTPS                                                |
-| `--cert`        | `-C`  | `cert.pem` | Path to TLS certificate                                         |
-| `--key`         | `-K`  | `key.pem`  | Path to TLS private key                                         |
-| `--cors`        |       | `false`    | Enable CORS (`Access-Control-Allow-Origin: *`)                  |
-| `--no-dotfiles` |       | `false`    | Hide dotfiles and deny access to them                           |
-| `--no-dirs`     |       | `false`    | Hide directories from listing and return 404 for directory paths |
-| `--exclude`     |       |            | Glob pattern to hide/block (repeatable, e.g. `--exclude '*.env'`) |
-| `--timeout`     | `-t`  | `120`      | Connection timeout in seconds (`0` to disable)                  |
-| `--ext`         | `-e`  | `html`     | Default extension for extensionless URLs                        |
-| `--open`        | `-o`  | `false`    | Open browser after starting                                     |
-| `--utc`         |       | `false`    | Use UTC timestamps in logs                                      |
-| `--symlinks`    |       | `false`    | Follow symbolic links                                           |
-| `--spa`         |       | `false`    | SPA mode — serve `index.html` for unmatched paths               |
-| `--watch`       | `-w`  | `false`    | Watch for file changes and live-reload browsers                 |
-| `--dir-size`    |       | `false`    | Calculate and display total size of directories in listings     |
-
-## Examples
-
-**Serve a React/Vue/Svelte build with SPA routing:**
-
-```sh
-goblet ./dist --spa
-```
-
-**Password-protect a directory:**
-
-```sh
+goblet ./dist --spa                          # a single-page app build
+goblet ./src --watch                         # reload the browser on changes
+goblet -p 0                                  # any free port, shown at startup
 goblet ./private --username admin --password secret
-```
-
-**Serve over HTTPS:**
-
-```sh
 goblet --tls --cert cert.pem --key key.pem
+goblet ./project --exclude '*.env' --exclude node_modules
 ```
 
-**Share files on the local network with caching enabled:**
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `-p`, `--port` | `8080` | Port to listen on; `0` picks a free one |
+| `-a`, `--address` | all interfaces | Address to bind to |
+| `-o`, `--open` | off | Open the browser after starting |
+| `-w`, `--watch` | off | Live-reload browsers when files change |
+| `--spa` | off | Serve `index.html` for unmatched paths |
+| `-e`, `--ext` | `html` | Extension tried for extensionless URLs |
+| `-d`, `--no-listing` | off | Turn off directory listings |
+| `--no-dirs` | off | Hide directories and return 404 for directory paths |
+| `--no-dotfiles` | off | Hide dotfiles and deny access to them |
+| `--exclude` | | Glob to hide and block; repeatable |
+| `--dir-size` | off | Show total directory sizes in listings |
+| `--symlinks` | off | Follow symbolic links |
+| `-c`, `--cache` | `-1` | `Cache-Control` max-age in seconds; `-1` turns caching off |
+| `--no-gzip` | off | Turn off gzip |
+| `--cors` | off | Send `Access-Control-Allow-Origin: *` |
+| `--username`, `--password` | | Basic auth; set both |
+| `-S`, `--tls` | off | Serve HTTPS |
+| `-C`, `--cert` | `cert.pem` | TLS certificate |
+| `-K`, `--key` | `key.pem` | TLS private key |
+| `-t`, `--timeout` | `120` | Connection timeout in seconds; `0` turns it off |
+| `-s`, `--silent` | off | No log output |
+| `--utc` | off | UTC timestamps in logs |
 
-```sh
-goblet ./files --cache 3600
-```
+Shell completions: Homebrew installs them. Otherwise see `goblet completion --help`.
 
-**Serve a static site quietly (no logs) with browser auto-open:**
+## License
 
-```sh
-goblet ./site --silent --open
-```
-
-**Pick a random free port (printed in the banner):**
-
-```sh
-goblet -p 0
-```
-
-**Serve a flat file collection with no directory navigation:**
-
-```sh
-goblet ./downloads --no-dirs
-```
-
-**Exclude sensitive files and heavy directories from serving and listing:**
-
-```sh
-goblet ./project --exclude '*.env' --exclude 'node_modules'
-```
-
-**Develop with live reload:**
-
-```sh
-goblet ./src --watch
-```
-
-**Show directory sizes in the listing:**
-
-```sh
-goblet ./files --dir-size
-```
+MIT. See [LICENSE](LICENSE).

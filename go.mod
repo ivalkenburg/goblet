@@ -1,4 +1,4 @@
-module goblet
+module github.com/ivalkenburg/goblet
 
 go 1.25.0
 
