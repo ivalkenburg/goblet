@@ -57,7 +57,7 @@ func newReloader(root string, exclude []string) (*reloader, error) {
 		done:    make(chan struct{}),
 		exclude: exclude,
 	}
-	go r.watch(w)
+	go r.watch()
 	return r, nil
 }
 
@@ -73,8 +73,8 @@ func watchTree(w *fsnotify.Watcher, root string, exclude []string) error {
 	})
 }
 
-func (r *reloader) watch(w *fsnotify.Watcher) {
-	defer w.Close()
+func (r *reloader) watch() {
+	w := r.watcher
 	var timer *time.Timer
 	defer func() {
 		if timer != nil {
@@ -87,17 +87,14 @@ func (r *reloader) watch(w *fsnotify.Watcher) {
 			if !ok {
 				return
 			}
-			// Watch newly created directories so they are covered too,
-			// unless they match an exclude pattern.
-			if event.Has(fsnotify.Create) {
-				if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
-					if !matchesExclude(filepath.Base(event.Name), r.exclude) {
-						_ = watchTree(w, event.Name, r.exclude)
-					}
-				}
-			}
 			if matchesExclude(filepath.Base(event.Name), r.exclude) {
 				continue
+			}
+			// Watch newly created directories so they are covered too.
+			if event.Has(fsnotify.Create) {
+				if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+					_ = watchTree(w, event.Name, r.exclude)
+				}
 			}
 			// Only reload on content-changing events; ignore Chmod and reads.
 			const mutating = fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
@@ -146,12 +143,10 @@ func (r *reloader) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable nginx proxy buffering
-	w.WriteHeader(http.StatusOK)
 
-	flusher.Flush()
-
+	// Register before flushing so a change right after the client sees the
+	// connection open is not missed.
 	ch := make(chan struct{}, 1)
 	r.mu.Lock()
 	r.clients[ch] = struct{}{}
@@ -161,6 +156,9 @@ func (r *reloader) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		delete(r.clients, ch)
 		r.mu.Unlock()
 	}()
+
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	ping := time.NewTicker(15 * time.Second)
 	defer ping.Stop()
@@ -225,7 +223,7 @@ func (w *injectWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
-// Flush forwards flushes so streaming responses work through the recorder.
+// Flush forwards flushes so streaming responses work through the writer.
 func (w *injectWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()

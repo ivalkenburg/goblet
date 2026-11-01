@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -427,4 +429,110 @@ func TestPrintBanner_LiveReloadNotShownWhenDisabled(t *testing.T) {
 	if strings.Contains(out, "Live reload") {
 		t.Errorf("expected no 'Live reload' line when Watch=false, got:\n%s", out)
 	}
+}
+
+// injectWriter — Flush
+
+func TestInjectWriter_FlushForwards(t *testing.T) {
+	rr := httptest.NewRecorder()
+	(&injectWriter{ResponseWriter: rr}).Flush()
+	if !rr.Flushed {
+		t.Error("Flush was not forwarded to the underlying writer")
+	}
+}
+
+// reloader SSE stream
+
+// nonFlusher hides the Flusher of the wrapped recorder.
+type nonFlusher struct{ http.ResponseWriter }
+
+func TestReloader_RejectsWriterWithoutFlush(t *testing.T) {
+	r := &reloader{clients: make(map[chan struct{}]struct{})}
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(nonFlusher{rr}, httptest.NewRequest("GET", reloadSSEPath, nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rr.Code)
+	}
+}
+
+func TestReloader_StreamsReloadAndStopsOnShutdown(t *testing.T) {
+	r, err := newReloader(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// The client is registered by the time the response headers arrive.
+	r.broadcast()
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "data: reload\n" {
+		t.Errorf("unexpected event %q", line)
+	}
+
+	r.shutdown()
+	done := make(chan struct{})
+	go func() {
+		io.Copy(io.Discard, resp.Body)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("stream stayed open after shutdown")
+	}
+}
+
+// newReloader — excluded paths
+
+func waitForNoBroadcast(t *testing.T, r *reloader, ch chan struct{}, change func()) {
+	t.Helper()
+	r.mu.Lock()
+	r.clients[ch] = struct{}{}
+	r.mu.Unlock()
+	change()
+	select {
+	case <-ch:
+		t.Error("change to an excluded path triggered a reload")
+	case <-time.After(1500 * time.Millisecond):
+	}
+}
+
+func TestNewReloader_IgnoresCreatedExcludedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	r, err := newReloader(dir, []string{"node_modules"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.shutdown()
+
+	waitForNoBroadcast(t, r, make(chan struct{}, 1), func() {
+		os.Mkdir(filepath.Join(dir, "node_modules"), 0755)
+		time.Sleep(100 * time.Millisecond)
+		os.WriteFile(filepath.Join(dir, "node_modules", "dep.js"), []byte("x"), 0644)
+	})
+}
+
+func TestNewReloader_DotfilePatternIgnoresDotDirectory(t *testing.T) {
+	dir := t.TempDir()
+	os.Mkdir(filepath.Join(dir, ".git"), 0755)
+	r, err := newReloader(dir, watchExcludes(&Config{NoDotfiles: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.shutdown()
+
+	waitForNoBroadcast(t, r, make(chan struct{}, 1), func() {
+		os.WriteFile(filepath.Join(dir, ".git", "index"), []byte("x"), 0644)
+		os.WriteFile(filepath.Join(dir, ".hidden"), []byte("x"), 0644)
+	})
 }

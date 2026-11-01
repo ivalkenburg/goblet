@@ -50,7 +50,7 @@ func registerFlags(cmd *cobra.Command) {
 	f.IntVarP(&cfg.Timeout, "timeout", "t", 120, "Connection timeout in seconds (0 to disable)")
 	f.StringVarP(&cfg.Ext, "ext", "e", "html", "Default file extension when none supplied")
 	f.BoolVarP(&cfg.OpenBrowser, "open", "o", false, "Open browser after starting the server")
-	f.BoolVar(&cfg.UTC, "utc", false, "Use UTC time format in log messages")
+	f.BoolVar(&cfg.UTC, "utc", false, "Use UTC times in log messages and listings")
 	f.BoolVar(&cfg.Symlinks, "symlinks", false, "Follow symbolic links")
 	f.BoolVar(&cfg.SPA, "spa", false, "Serve root index.html for all unmatched paths (SPA mode)")
 	f.BoolVarP(&cfg.Watch, "watch", "w", false, "Watch for file changes and live-reload browsers")

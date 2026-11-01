@@ -1,12 +1,15 @@
 package main
 
 import (
+	"compress/gzip"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // statusRecorder
@@ -27,31 +30,6 @@ func TestStatusRecorder_WriteHeader(t *testing.T) {
 	}
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("underlying writer expected 404, got %d", rr.Code)
-	}
-}
-
-func TestStatusRecorder_Write(t *testing.T) {
-	rr := httptest.NewRecorder()
-	rec := &statusRecorder{ResponseWriter: rr, status: http.StatusOK}
-	n, err := rec.Write([]byte("hello"))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("expected 5 bytes written, got %d", n)
-	}
-	if rec.size != 5 {
-		t.Errorf("expected size 5, got %d", rec.size)
-	}
-}
-
-func TestStatusRecorder_WriteAccumulatesSize(t *testing.T) {
-	rr := httptest.NewRecorder()
-	rec := &statusRecorder{ResponseWriter: rr, status: http.StatusOK}
-	rec.Write([]byte("abc"))
-	rec.Write([]byte("de"))
-	if rec.size != 5 {
-		t.Errorf("expected accumulated size 5, got %d", rec.size)
 	}
 }
 
@@ -821,5 +799,282 @@ func TestFileHandler_ConditionalGet_NotModified(t *testing.T) {
 	}
 	if rr2.Body.Len() != 0 {
 		t.Error("expected empty body for 304 response")
+	}
+}
+
+// clientIP — malformed RemoteAddr
+
+func TestClientIP_RemoteAddrWithoutPort(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "not-a-host-port"
+	if got := clientIP(r); got != "not-a-host-port" {
+		t.Errorf("expected raw RemoteAddr, got %q", got)
+	}
+}
+
+// loggingMiddleware
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	fn()
+	w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+func TestLoggingMiddleware_LogsRequest(t *testing.T) {
+	h := loggingMiddleware(http.NotFoundHandler(), &Config{})
+	req := httptest.NewRequest("GET", "/missing?x=1", nil)
+	req.RemoteAddr = "10.0.0.1:1234"
+	out := captureStdout(t, func() { h.ServeHTTP(httptest.NewRecorder(), req) })
+	for _, want := range []string{"10.0.0.1", `"GET /missing?x=1 HTTP/1.1"`, " 404 "} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log line missing %q: %s", want, out)
+		}
+	}
+}
+
+func TestLoggingMiddleware_UsesUTC(t *testing.T) {
+	old := time.Local
+	time.Local = time.FixedZone("test", 5*60*60)
+	defer func() { time.Local = old }()
+
+	h := loggingMiddleware(http.NotFoundHandler(), &Config{UTC: true})
+	before := time.Now().UTC().Format("2006-01-02 15")
+	out := captureStdout(t, func() { h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil)) })
+	after := time.Now().UTC().Format("2006-01-02 15")
+	if !strings.HasPrefix(out, "["+before) && !strings.HasPrefix(out, "["+after) {
+		t.Errorf("expected UTC timestamp around %s, got %s", before, out)
+	}
+}
+
+// fileHandler — lookup failures
+
+func TestFileHandler_FileAsParentDirectoryIsNotFound(t *testing.T) {
+	dir := newTestDir(t)
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0644)
+
+	rr := httptest.NewRecorder()
+	(&fileHandler{cfg: &Config{Root: dir, Ext: "html"}}).ServeHTTP(rr, httptest.NewRequest("GET", "/file.txt/child", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rr.Code)
+	}
+}
+
+func TestFileHandler_FileAsParentDirectoryFallsBackToSPA(t *testing.T) {
+	dir := newTestDir(t)
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("app"), 0644)
+
+	rr := httptest.NewRecorder()
+	(&fileHandler{cfg: &Config{Root: dir, SPA: true}}).ServeHTTP(rr, httptest.NewRequest("GET", "/file.txt/child", nil))
+	if rr.Code != http.StatusOK || rr.Body.String() != "app" {
+		t.Errorf("expected SPA index, got %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestFileHandler_UnrepresentablePathsAreNotFound(t *testing.T) {
+	dir := newTestDir(t)
+	fh := &fileHandler{cfg: &Config{Root: dir}}
+	for name, target := range map[string]string{
+		"nul byte":  "/a%00b",
+		"long name": "/" + strings.Repeat("a", 5000),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			fh.ServeHTTP(rr, httptest.NewRequest("GET", target, nil))
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("expected 404, got %d", rr.Code)
+			}
+		})
+	}
+}
+
+func TestFileHandler_UnreadableFileReturns500(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	dir := newTestDir(t)
+	os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("x"), 0000)
+
+	rr := httptest.NewRecorder()
+	(&fileHandler{cfg: &Config{Root: dir}}).ServeHTTP(rr, httptest.NewRequest("GET", "/secret.txt", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rr.Code)
+	}
+}
+
+func TestFileInfo_RejectsPathOutsideRoot(t *testing.T) {
+	root := filepath.Join(newTestDir(t), "root")
+	os.Mkdir(root, 0755)
+	if _, denied, _ := fileInfo(&Config{Root: root}, filepath.Dir(root)); !denied {
+		t.Error("path outside root should be denied")
+	}
+}
+
+// fileHandler — directory redirects
+
+func TestFileHandler_DirectoryRedirect_CannotLeaveHost(t *testing.T) {
+	dir := newTestDir(t)
+	req := httptest.NewRequest("GET", "/", nil)
+	req.URL.Path = "//evil.example/.."
+
+	rr := httptest.NewRecorder()
+	(&fileHandler{cfg: &Config{Root: dir}}).ServeHTTP(rr, req)
+	if got := rr.Header().Get("Location"); got != "/" {
+		t.Errorf("expected redirect to /, got %q", got)
+	}
+}
+
+func TestFileHandler_DirectoryRedirect_KeepsQuery(t *testing.T) {
+	dir := newTestDir(t)
+	os.Mkdir(filepath.Join(dir, "sub"), 0755)
+
+	rr := httptest.NewRecorder()
+	(&fileHandler{cfg: &Config{Root: dir}}).ServeHTTP(rr, httptest.NewRequest("GET", "/sub?x=1", nil))
+	if got := rr.Header().Get("Location"); got != "/sub/?x=1" {
+		t.Errorf("expected query to survive, got %q", got)
+	}
+}
+
+func TestFileHandler_DirectoryRedirect_EscapesName(t *testing.T) {
+	dir := newTestDir(t)
+	os.Mkdir(filepath.Join(dir, "a?b"), 0755)
+
+	rr := httptest.NewRecorder()
+	(&fileHandler{cfg: &Config{Root: dir}}).ServeHTTP(rr, httptest.NewRequest("GET", "/a%3Fb", nil))
+	if got := rr.Header().Get("Location"); got != "/a%3Fb/" {
+		t.Errorf("expected escaped location, got %q", got)
+	}
+}
+
+// isHidden
+
+func TestIsHidden(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{".env", Config{}, false},
+		{".env", Config{NoDotfiles: true}, true},
+		{"app.env", Config{NoDotfiles: true}, false},
+		{"app.env", Config{Exclude: []string{"*.env"}}, true},
+		{"app.txt", Config{Exclude: []string{"*.env"}}, false},
+	}
+	for _, c := range cases {
+		if got := isHidden(&c.cfg, c.name); got != c.want {
+			t.Errorf("isHidden(%+v, %q) = %v, want %v", c.cfg, c.name, got, c.want)
+		}
+	}
+}
+
+// buildHandler — the assembled middleware chain
+
+func TestBuildHandler_CORSPreflightBypassesAuth(t *testing.T) {
+	h := buildHandler(&Config{Root: newTestDir(t), CORS: true, Username: "u", Password: "p", Silent: true}, nil)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("OPTIONS", "/", nil))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Authorization") {
+		t.Errorf("Authorization not allowed: %q", got)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("GET without credentials should stay 401, got %d", rr.Code)
+	}
+	if rr.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Error("401 should carry CORS headers so the browser can read it")
+	}
+}
+
+func TestBuildHandler_Gzip(t *testing.T) {
+	dir := newTestDir(t)
+	body := strings.Repeat("compress me ", 500)
+	os.WriteFile(filepath.Join(dir, "big.txt"), []byte(body), 0644)
+
+	for _, noGzip := range []bool{false, true} {
+		h := buildHandler(&Config{Root: dir, NoGzip: noGzip, Silent: true}, nil)
+		req := httptest.NewRequest("GET", "/big.txt", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if gzipped := rr.Header().Get("Content-Encoding") == "gzip"; gzipped == noGzip {
+			t.Errorf("NoGzip=%v: Content-Encoding=%q", noGzip, rr.Header().Get("Content-Encoding"))
+		}
+	}
+}
+
+func TestBuildHandler_InjectsReloadScriptIntoGzippedHTML(t *testing.T) {
+	dir := newTestDir(t)
+	page := "<html><body>" + strings.Repeat("hello ", 500) + "</body></html>"
+	os.WriteFile(filepath.Join(dir, "page.html"), []byte(page), 0644)
+
+	r := &reloader{clients: make(map[chan struct{}]struct{}), done: make(chan struct{})}
+	req := httptest.NewRequest("GET", "/page.html", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rr := httptest.NewRecorder()
+	buildHandler(&Config{Root: dir, Silent: true}, r).ServeHTTP(rr, req)
+
+	if rr.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("expected gzip, headers: %v", rr.Header())
+	}
+	zr, err := gzip.NewReader(rr.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), reloadSSEPath) {
+		t.Error("reload script missing from gzipped HTML")
+	}
+}
+
+func TestBuildHandler_SSERequiresAuthAndSkipsGzip(t *testing.T) {
+	r := &reloader{clients: make(map[chan struct{}]struct{}), done: make(chan struct{})}
+	h := buildHandler(&Config{Root: newTestDir(t), Username: "u", Password: "p", Silent: true}, r)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", reloadSSEPath, nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+
+	close(r.done)
+	req := httptest.NewRequest("GET", reloadSSEPath, nil)
+	req.SetBasicAuth("u", "p")
+	req.Header.Set("Accept-Encoding", "gzip")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Header().Get("Content-Type") != "text/event-stream" || rr.Header().Get("Content-Encoding") != "" {
+		t.Errorf("unexpected SSE headers: %v", rr.Header())
+	}
+}
+
+func TestBuildHandler_LoggingEnabledUnlessSilent(t *testing.T) {
+	dir := newTestDir(t)
+	for silent, wantLog := range map[bool]bool{false: true, true: false} {
+		h := buildHandler(&Config{Root: dir, Silent: silent}, nil)
+		out := captureStdout(t, func() { h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil)) })
+		if (out != "") != wantLog {
+			t.Errorf("Silent=%v: log output %q", silent, out)
+		}
 	}
 }

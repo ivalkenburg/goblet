@@ -2,10 +2,19 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -262,5 +271,173 @@ func TestPrintBanner_NoListingDisabled(t *testing.T) {
 	out := captureBanner(cfg, "http")
 	if !strings.Contains(out, "disabled") {
 		t.Errorf("expected listing 'disabled' in banner, got:\n%s", out)
+	}
+}
+
+func TestPrintBanner_ValuesAligned(t *testing.T) {
+	out := captureBanner(&Config{Root: ".", Port: 8080, Watch: true, TLS: true, Cert: "c", Key: "k"}, "https")
+	col := -1
+	for _, label := range []string{"Gzip:", "Cache:", "Listing:", "Auth:", "CORS:", "TLS:", "Live reload:"} {
+		_, rest, ok := strings.Cut(out, "  "+label)
+		if !ok {
+			t.Fatalf("banner missing %q:\n%s", label, out)
+		}
+		c := len(label) + len(rest) - len(strings.TrimLeft(rest, " "))
+		if col != -1 && c != col {
+			t.Errorf("%q value at column %d, want %d", label, c, col)
+		}
+		col = c
+	}
+}
+
+// browserHost
+
+func TestBrowserHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"":          "127.0.0.1",
+		"0.0.0.0":   "127.0.0.1",
+		"::":        "::1",
+		"127.0.0.1": "127.0.0.1",
+		"::1":       "::1",
+		"myhost":    "myhost",
+	} {
+		if got := browserHost(in); got != want {
+			t.Errorf("browserHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// watchExcludes
+
+func TestWatchExcludes(t *testing.T) {
+	cfg := &Config{Exclude: []string{"node_modules"}}
+	if got := watchExcludes(cfg); !slices.Equal(got, cfg.Exclude) {
+		t.Errorf("unexpected patterns: %v", got)
+	}
+
+	cfg.NoDotfiles = true
+	got := watchExcludes(cfg)
+	if !slices.Equal(got, []string{"node_modules", ".*"}) {
+		t.Errorf("dotfiles should be excluded: %v", got)
+	}
+	if len(cfg.Exclude) != 1 {
+		t.Errorf("config was mutated: %v", cfg.Exclude)
+	}
+}
+
+// Start — validation before binding
+
+func TestStart_InvalidExcludePattern(t *testing.T) {
+	err := Start(&Config{Root: t.TempDir(), Port: 0, Exclude: []string{"["}})
+	if err == nil || !strings.Contains(err.Error(), "--exclude") {
+		t.Fatalf("expected --exclude error, got %v", err)
+	}
+}
+
+func TestStart_MissingTLSCertificateFailsBeforeBanner(t *testing.T) {
+	dir := t.TempDir()
+	var err error
+	out := captureStdout(t, func() {
+		err = Start(&Config{Root: dir, Port: 0, TLS: true, Cert: filepath.Join(dir, "no.pem"), Key: filepath.Join(dir, "no.pem")})
+	})
+	if err == nil || !strings.Contains(err.Error(), "TLS") {
+		t.Fatalf("expected TLS error, got %v", err)
+	}
+	if out != "" {
+		t.Errorf("banner printed before certificate validation: %q", out)
+	}
+}
+
+// Start — live server behaviour
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func writeSelfSignedCert(t *testing.T, dir string) (certFile, keyFile string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile = filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
+func TestStart_ServesTLS(t *testing.T) {
+	root, certDir := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile := writeSelfSignedCert(t, certDir)
+	port := freePort(t)
+
+	startErr := make(chan error, 1)
+	go func() {
+		startErr <- Start(&Config{Root: root, Port: port, Address: "127.0.0.1", Silent: true, TLS: true, Cert: certFile, Key: keyFile})
+	}()
+
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	var resp *http.Response
+	var err error
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if resp, err = client.Get("https://127.0.0.1:" + strconv.Itoa(port) + "/hello.txt"); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatalf("HTTPS request failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "hi" {
+		t.Errorf("unexpected body %q", body)
+	}
+
+	proc, _ := os.FindProcess(os.Getpid())
+	proc.Signal(syscall.SIGTERM)
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Errorf("expected clean shutdown, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after SIGTERM")
+	}
+}
+
+// run
+
+func TestRun_UsesPathArgument(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	err := run(rootCmd, []string{missing})
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("expected error naming the path, got %v", err)
 	}
 }

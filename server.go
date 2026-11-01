@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"runtime"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -28,6 +31,28 @@ func Start(cfg *Config) error {
 		return fmt.Errorf("--username and --password must both be provided together")
 	}
 
+	for _, pat := range cfg.Exclude {
+		if _, err := path.Match(pat, ""); err != nil {
+			return fmt.Errorf("invalid --exclude pattern %q: %w", pat, err)
+		}
+	}
+
+	srv := &http.Server{}
+	if cfg.Timeout > 0 {
+		d := time.Duration(cfg.Timeout) * time.Second
+		srv.ReadHeaderTimeout = d
+		srv.ReadTimeout = d
+		srv.WriteTimeout = d
+		srv.IdleTimeout = d * 2
+	}
+	if cfg.TLS {
+		cert, err := tls.LoadX509KeyPair(cfg.Cert, cfg.Key)
+		if err != nil {
+			return fmt.Errorf("cannot load TLS certificate: %w", err)
+		}
+		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
+
 	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Address, strconv.Itoa(cfg.Port)))
 	if err != nil {
 		return fmt.Errorf("cannot listen on port %d: %w", cfg.Port, err)
@@ -43,10 +68,9 @@ func Start(cfg *Config) error {
 
 	var r *reloader
 	if cfg.Watch {
-		var werr error
-		r, werr = newReloader(cfg.Root, cfg.Exclude)
-		if werr != nil {
-			fmt.Fprintf(os.Stderr, "warning: live reload disabled: %v\n", werr)
+		r, err = newReloader(cfg.Root, watchExcludes(cfg))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: live reload disabled: %v\n", err)
 			cfg.Watch = false
 		}
 	}
@@ -55,14 +79,7 @@ func Start(cfg *Config) error {
 		printBanner(cfg, scheme, port)
 	}
 
-	srv := &http.Server{Handler: buildHandler(cfg, r)}
-	if cfg.Timeout > 0 {
-		d := time.Duration(cfg.Timeout) * time.Second
-		srv.ReadHeaderTimeout = d
-		srv.ReadTimeout = d
-		srv.WriteTimeout = d
-		srv.IdleTimeout = d * 2
-	}
+	srv.Handler = buildHandler(cfg, r)
 
 	if cfg.OpenBrowser {
 		go openBrowser(fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(browserHost(cfg.Address), strconv.Itoa(port))))
@@ -75,7 +92,7 @@ func Start(cfg *Config) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		if cfg.TLS {
-			serveErr <- srv.ServeTLS(ln, cfg.Cert, cfg.Key)
+			serveErr <- srv.ServeTLS(ln, "", "")
 		} else {
 			serveErr <- srv.Serve(ln)
 		}
@@ -86,9 +103,7 @@ func Start(cfg *Config) error {
 		if r != nil {
 			r.shutdown()
 		}
-		if err != http.ErrServerClosed {
-			return err
-		}
+		return err
 	case <-quit:
 		if !cfg.Silent {
 			fmt.Println("\nShutting down...")
@@ -100,7 +115,15 @@ func Start(cfg *Config) error {
 		defer cancel()
 		return srv.Shutdown(ctx)
 	}
-	return nil
+}
+
+// watchExcludes returns the patterns the file watcher skips, so changes to
+// paths that are not served never trigger a reload.
+func watchExcludes(cfg *Config) []string {
+	if cfg.NoDotfiles {
+		return append(slices.Clip(cfg.Exclude), ".*")
+	}
+	return cfg.Exclude
 }
 
 func onOff(enabled bool) string {
@@ -147,14 +170,14 @@ func printBanner(cfg *Config, scheme string, port int) {
 		{"Auth", authVal},
 		{"CORS", onOff(cfg.CORS)},
 	}
-	for _, f := range flags {
-		fmt.Printf("  %-10s %s\n", f.label+":", f.val)
-	}
 	if cfg.TLS {
-		fmt.Printf("  %-10s %s / %s\n", "TLS:", cfg.Cert, cfg.Key)
+		flags = append(flags, struct{ label, val string }{"TLS", cfg.Cert + " / " + cfg.Key})
 	}
 	if cfg.Watch {
-		fmt.Printf("  %-10s %s\n", "Live reload:", "enabled")
+		flags = append(flags, struct{ label, val string }{"Live reload", "enabled"})
+	}
+	for _, f := range flags {
+		fmt.Printf("  %-13s%s\n", f.label+":", f.val)
 	}
 	fmt.Print("\n  Hit CTRL-C to stop\n\n")
 }

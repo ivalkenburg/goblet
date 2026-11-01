@@ -1,11 +1,13 @@
 package main
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // buildBreadcrumbs
@@ -135,7 +137,7 @@ func newListingDir(t *testing.T) string {
 func TestServeDirectoryListing_ContentType(t *testing.T) {
 	dir := newListingDir(t)
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{})
+	serveDirectoryListing(rr, dir, "/", &Config{})
 
 	ct := rr.Header().Get("Content-Type")
 	if !strings.HasPrefix(ct, "text/html") {
@@ -148,7 +150,7 @@ func TestServeDirectoryListing_ShowsFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("data"), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{})
+	serveDirectoryListing(rr, dir, "/", &Config{})
 
 	if !strings.Contains(rr.Body.String(), "readme.txt") {
 		t.Error("listing should contain 'readme.txt'")
@@ -159,7 +161,7 @@ func TestServeDirectoryListing_EscapesFileLink(t *testing.T) {
 	dir := newListingDir(t)
 	os.WriteFile(filepath.Join(dir, "a#b?.txt"), []byte("data"), 0644)
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{})
+	serveDirectoryListing(rr, dir, "/", &Config{})
 	if !strings.Contains(rr.Body.String(), `href="a%23b%3F.txt"`) {
 		t.Fatalf("special filename was not URL escaped in listing")
 	}
@@ -170,7 +172,7 @@ func TestServeDirectoryListing_ShowsSubdirectories(t *testing.T) {
 	os.Mkdir(filepath.Join(dir, "subdir"), 0755)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{})
+	serveDirectoryListing(rr, dir, "/", &Config{})
 
 	if !strings.Contains(rr.Body.String(), "subdir") {
 		t.Error("listing should contain 'subdir'")
@@ -183,7 +185,7 @@ func TestServeDirectoryListing_NoDotfilesHidesDotEntries(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("public"), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{NoDotfiles: true})
+	serveDirectoryListing(rr, dir, "/", &Config{NoDotfiles: true})
 
 	body := rr.Body.String()
 	if strings.Contains(body, ".hidden") {
@@ -199,7 +201,7 @@ func TestServeDirectoryListing_NoDotfilesWithoutFlag(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, ".env"), []byte("secret"), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{NoDotfiles: false})
+	serveDirectoryListing(rr, dir, "/", &Config{NoDotfiles: false})
 
 	if !strings.Contains(rr.Body.String(), ".env") {
 		t.Error("listing without NoDotfiles should show '.env'")
@@ -209,7 +211,7 @@ func TestServeDirectoryListing_NoDotfilesWithoutFlag(t *testing.T) {
 func TestServeDirectoryListing_ShowsBreadcrumbs(t *testing.T) {
 	dir := newListingDir(t)
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/docs/api/", nil), dir, "/docs/api", &Config{})
+	serveDirectoryListing(rr, dir, "/docs/api", &Config{})
 
 	body := rr.Body.String()
 	// Both path segments should appear in the rendered breadcrumbs
@@ -227,7 +229,7 @@ func TestServeDirectoryListing_EntriesSortedDirsFirst(t *testing.T) {
 	os.Mkdir(filepath.Join(dir, "zzz"), 0755)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{})
+	serveDirectoryListing(rr, dir, "/", &Config{})
 
 	body := rr.Body.String()
 	zzzPos := strings.Index(body, "zzz")
@@ -248,7 +250,7 @@ func TestServeDirectoryListing_NoDirs_HidesSubdirectories(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{NoDirs: true})
+	serveDirectoryListing(rr, dir, "/", &Config{NoDirs: true})
 
 	body := rr.Body.String()
 	if strings.Contains(body, "subdir") {
@@ -265,7 +267,7 @@ func TestServeDirectoryListing_NoDirs_StillShowsFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b"), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{NoDirs: true})
+	serveDirectoryListing(rr, dir, "/", &Config{NoDirs: true})
 
 	body := rr.Body.String()
 	if !strings.Contains(body, "a.txt") || !strings.Contains(body, "b.txt") {
@@ -279,7 +281,7 @@ func TestServeDirectoryListing_ExcludeHidesEntry(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "style.css"), []byte("body{}"), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{Exclude: []string{"*.env"}})
+	serveDirectoryListing(rr, dir, "/", &Config{Exclude: []string{"*.env"}})
 
 	body := rr.Body.String()
 	if strings.Contains(body, "secret.env") {
@@ -296,7 +298,7 @@ func TestServeDirectoryListing_ExcludeHidesDirectory(t *testing.T) {
 	os.Mkdir(filepath.Join(dir, "src"), 0755)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{Exclude: []string{"node_modules"}})
+	serveDirectoryListing(rr, dir, "/", &Config{Exclude: []string{"node_modules"}})
 
 	body := rr.Body.String()
 	if strings.Contains(body, "node_modules") {
@@ -317,7 +319,7 @@ func TestServeDirectoryListing_SymlinkHiddenWhenSymlinksDisabled(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{Symlinks: false})
+	serveDirectoryListing(rr, dir, "/", &Config{Symlinks: false})
 
 	body := rr.Body.String()
 	if strings.Contains(body, "link.txt") {
@@ -338,7 +340,7 @@ func TestServeDirectoryListing_SymlinkShownWhenSymlinksEnabled(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{Symlinks: true})
+	serveDirectoryListing(rr, dir, "/", &Config{Symlinks: true})
 
 	if !strings.Contains(rr.Body.String(), "link.txt") {
 		t.Error("symlink should appear in listing when --symlinks is enabled")
@@ -355,14 +357,14 @@ func TestServeDirectoryListing_SymlinkHasIndicator(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{Symlinks: true})
+	serveDirectoryListing(rr, dir, "/", &Config{Symlinks: true})
 
 	body := rr.Body.String()
 	if !strings.Contains(body, "link.txt") {
 		t.Error("symlink should appear in listing when --symlinks is enabled")
 	}
-	if !strings.Contains(body, `data-symlink="1"`) {
-		t.Error("symlink entry should have data-symlink=1 attribute")
+	if !strings.Contains(body, "&#128279;") {
+		t.Error("symlink entry should use the link icon")
 	}
 }
 
@@ -370,7 +372,7 @@ func TestServeDirectoryListing_SymlinkHasIndicator(t *testing.T) {
 
 func TestDirTotalSize_Empty(t *testing.T) {
 	dir := newListingDir(t)
-	if got := dirTotalSize(dir, false); got != 0 {
+	if got := dirTotalSize(dir, &Config{}); got != 0 {
 		t.Errorf("expected 0 for empty dir, got %d", got)
 	}
 }
@@ -378,7 +380,7 @@ func TestDirTotalSize_Empty(t *testing.T) {
 func TestDirTotalSize_SingleFile(t *testing.T) {
 	dir := newListingDir(t)
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0644)
-	if got := dirTotalSize(dir, false); got != 5 {
+	if got := dirTotalSize(dir, &Config{}); got != 5 {
 		t.Errorf("expected 5, got %d", got)
 	}
 }
@@ -389,7 +391,7 @@ func TestDirTotalSize_Nested(t *testing.T) {
 	os.Mkdir(sub, 0755)
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("ab"), 0644)
 	os.WriteFile(filepath.Join(sub, "b.txt"), []byte("cde"), 0644)
-	if got := dirTotalSize(dir, false); got != 5 {
+	if got := dirTotalSize(dir, &Config{}); got != 5 {
 		t.Errorf("expected 5 (2+3), got %d", got)
 	}
 }
@@ -403,7 +405,7 @@ func TestDirTotalSize_SkipsSymlinksWhenDisabled(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 	// With symlinks disabled only real.txt (5 bytes) should be counted.
-	if got := dirTotalSize(dir, false); got != 5 {
+	if got := dirTotalSize(dir, &Config{}); got != 5 {
 		t.Errorf("expected 5 (symlink excluded), got %d", got)
 	}
 }
@@ -417,7 +419,7 @@ func TestDirTotalSize_FollowsSymlinksWithoutCycles(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 	os.Symlink(dir, filepath.Join(sub, "loop"))
-	if got := dirTotalSize(filepath.Join(dir, "linked"), true); got != 5 {
+	if got := dirTotalSize(filepath.Join(dir, "linked"), &Config{Symlinks: true}); got != 5 {
 		t.Fatalf("expected 5 bytes through symlink with cycle, got %d", got)
 	}
 }
@@ -431,7 +433,7 @@ func TestServeDirectoryListing_SymlinkDirectory(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{Symlinks: true, DirSize: true})
+	serveDirectoryListing(rr, dir, "/", &Config{Symlinks: true, DirSize: true})
 	if !strings.Contains(rr.Body.String(), `href="linked/"`) || !strings.Contains(rr.Body.String(), `data-size="5"`) {
 		t.Fatalf("symlinked directory should have directory link and size")
 	}
@@ -444,7 +446,7 @@ func TestServeDirectoryListing_DirSize_ShowsSize(t *testing.T) {
 	os.WriteFile(filepath.Join(sub, "data.bin"), make([]byte, 1024), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{DirSize: true})
+	serveDirectoryListing(rr, dir, "/", &Config{DirSize: true})
 
 	body := rr.Body.String()
 	if !strings.Contains(body, "1.0 KB") {
@@ -459,7 +461,7 @@ func TestServeDirectoryListing_DirSize_Disabled_NotCalculated(t *testing.T) {
 	os.WriteFile(filepath.Join(sub, "data.bin"), make([]byte, 1024), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{DirSize: false})
+	serveDirectoryListing(rr, dir, "/", &Config{DirSize: false})
 
 	body := rr.Body.String()
 	// data-size must be 0 — no walk was performed
@@ -481,7 +483,7 @@ func TestServeDirectoryListing_DirSize_SizeBytesSetForSorting(t *testing.T) {
 	os.WriteFile(filepath.Join(large, "f.bin"), make([]byte, 500), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{DirSize: true})
+	serveDirectoryListing(rr, dir, "/", &Config{DirSize: true})
 
 	body := rr.Body.String()
 	// Both data-size attributes should be non-zero
@@ -498,10 +500,107 @@ func TestServeDirectoryListing_RegularFileNotSymlink(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "plain.txt"), []byte("data"), 0644)
 
 	rr := httptest.NewRecorder()
-	serveDirectoryListing(rr, httptest.NewRequest("GET", "/", nil), dir, "/", &Config{})
+	serveDirectoryListing(rr, dir, "/", &Config{})
 
 	body := rr.Body.String()
-	if !strings.Contains(body, `data-symlink="0"`) {
-		t.Error("regular file should have data-symlink=0")
+	if strings.Contains(body, "&#128279;") {
+		t.Error("regular file should not use the link icon")
+	}
+}
+
+// serveDirectoryListing — links
+
+func TestServeDirectoryListing_ColonInNameKeepsWorkingLink(t *testing.T) {
+	dir := newListingDir(t)
+	os.WriteFile(filepath.Join(dir, "javascript:x.txt"), []byte("x"), 0644)
+
+	rr := httptest.NewRecorder()
+	serveDirectoryListing(rr, dir, "/", &Config{})
+
+	body := rr.Body.String()
+	if strings.Contains(body, "ZgotmplZ") {
+		t.Error("link was neutralised by html/template")
+	}
+	if !strings.Contains(body, `href="./javascript:x.txt"`) {
+		t.Error("expected a relative link that cannot read as a URL scheme")
+	}
+}
+
+func TestServeDirectoryListing_DirectoriesAndFilesSortedByName(t *testing.T) {
+	dir := newListingDir(t)
+	for _, name := range []string{"b.txt", "a.txt"} {
+		os.WriteFile(filepath.Join(dir, name), nil, 0644)
+	}
+	for _, name := range []string{"z", "y"} {
+		os.Mkdir(filepath.Join(dir, name), 0755)
+	}
+
+	rr := httptest.NewRecorder()
+	serveDirectoryListing(rr, dir, "/", &Config{})
+
+	body := rr.Body.String()
+	last := -1
+	for _, name := range []string{`data-name="y"`, `data-name="z"`, `data-name="a.txt"`, `data-name="b.txt"`} {
+		i := strings.Index(body, name)
+		if i <= last {
+			t.Fatalf("%s out of order", name)
+		}
+		last = i
+	}
+}
+
+func TestServeDirectoryListing_BrokenSymlinkSkipped(t *testing.T) {
+	dir := newListingDir(t)
+	if err := os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "broken")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	serveDirectoryListing(rr, dir, "/", &Config{Symlinks: true})
+	if strings.Contains(rr.Body.String(), "broken") {
+		t.Error("broken symlink should not be listed")
+	}
+}
+
+func TestServeDirectoryListing_UnreadableDirectoryReturns500(t *testing.T) {
+	rr := httptest.NewRecorder()
+	serveDirectoryListing(rr, filepath.Join(t.TempDir(), "missing"), "/", &Config{})
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rr.Code)
+	}
+}
+
+func TestServeDirectoryListing_UTCModTime(t *testing.T) {
+	dir := newListingDir(t)
+	path := filepath.Join(dir, "f.txt")
+	os.WriteFile(path, nil, 0644)
+	mtime := time.Date(2020, 1, 2, 3, 4, 0, 0, time.UTC)
+	os.Chtimes(path, mtime, mtime)
+
+	old := time.Local
+	time.Local = time.FixedZone("test", 5*60*60)
+	defer func() { time.Local = old }()
+
+	rr := httptest.NewRecorder()
+	serveDirectoryListing(rr, dir, "/", &Config{UTC: true})
+	if !strings.Contains(rr.Body.String(), "2020-01-02 03:04") {
+		t.Error("expected UTC modification time")
+	}
+}
+
+// dirTotalSize — visibility
+
+func TestDirTotalSize_SkipsHiddenEntries(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "shown.txt"), []byte("12345"), 0644)
+	os.WriteFile(filepath.Join(dir, ".secret"), []byte("123"), 0644)
+	os.Mkdir(filepath.Join(dir, "node_modules"), 0755)
+	os.WriteFile(filepath.Join(dir, "node_modules", "dep.js"), []byte("1234567"), 0644)
+
+	if got := dirTotalSize(dir, &Config{NoDotfiles: true, Exclude: []string{"node_modules"}}); got != 5 {
+		t.Errorf("expected 5, got %d", got)
+	}
+	if got := dirTotalSize(dir, &Config{}); got != 15 {
+		t.Errorf("expected 15 with nothing hidden, got %d", got)
 	}
 }

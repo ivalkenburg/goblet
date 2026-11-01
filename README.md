@@ -80,7 +80,7 @@ goblet ./project --exclude '*.env' --exclude node_modules
 | `-K`, `--key` | `key.pem` | TLS private key |
 | `-t`, `--timeout` | `120` | Connection timeout in seconds; `0` turns it off |
 | `-s`, `--silent` | off | No log output |
-| `--utc` | off | UTC timestamps in logs |
+| `--utc` | off | UTC times in logs and listings |
 
 Shell completions: Homebrew installs them. Otherwise see `goblet completion --help`.
 

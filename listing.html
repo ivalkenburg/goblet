@@ -240,7 +240,6 @@
             data-ext="{{.Ext}}"
             data-size="{{.SizeBytes}}"
             data-date="{{.ModTime}}"
-            data-symlink="{{if .IsSymlink}}1{{else}}0{{end}}"
           >
             <td class="ico-cell">
               {{if .IsSymlink}}<i class="ico">&#128279;</i>{{else if .IsDir}}<i

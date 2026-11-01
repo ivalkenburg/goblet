@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	_ "embed"
 	"fmt"
 	"html/template"
@@ -9,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -49,81 +47,74 @@ func buildBreadcrumbs(urlPath string) []breadcrumb {
 	parts := strings.Split(strings.Trim(urlPath, "/"), "/")
 	crumbs := make([]breadcrumb, 0, len(parts))
 	var href strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
+	for i, p := range parts {
 		href.WriteString("/" + url.PathEscape(p))
-		crumbs = append(crumbs, breadcrumb{Name: p, Href: href.String() + "/"})
-	}
-	if len(crumbs) > 0 {
-		crumbs[len(crumbs)-1].IsLast = true
+		crumbs = append(crumbs, breadcrumb{Name: p, Href: href.String() + "/", IsLast: i == len(parts)-1})
 	}
 	return crumbs
 }
 
-func serveDirectoryListing(w http.ResponseWriter, _ *http.Request, dir, urlPath string, cfg *Config) {
+// visibleEntry returns the FileInfo for a directory entry, following symlinks
+// when they are enabled. It reports false for entries that must stay hidden.
+func visibleEntry(cfg *Config, dir string, e os.DirEntry) (os.FileInfo, bool) {
+	if isHidden(cfg, e.Name()) {
+		return nil, false
+	}
+	var fi os.FileInfo
+	var err error
+	if e.Type()&os.ModeSymlink == 0 {
+		fi, err = e.Info()
+	} else if cfg.Symlinks {
+		fi, err = os.Stat(filepath.Join(dir, e.Name()))
+	} else {
+		return nil, false
+	}
+	return fi, err == nil
+}
+
+func serveDirectoryListing(w http.ResponseWriter, dir, urlPath string, cfg *Config) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		http.Error(w, "Error reading directory", http.StatusInternalServerError)
 		return
 	}
 
+	// os.ReadDir sorts by name, so dirs and files stay sorted.
 	var dirs, files []dirEntry
 	for _, e := range entries {
-		if cfg.NoDotfiles && strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		if matchesExclude(e.Name(), cfg.Exclude) {
-			continue
-		}
-		isSymlink := e.Type()&os.ModeSymlink != 0
-		// Hide symlinks when the server is not configured to follow them.
-		if isSymlink && !cfg.Symlinks {
-			continue
-		}
-		var fi os.FileInfo
-		if isSymlink {
-			fi, err = os.Stat(filepath.Join(dir, e.Name()))
-		} else {
-			fi, err = e.Info()
-		}
-		if err != nil || (cfg.NoDirs && fi.IsDir()) {
+		fi, ok := visibleEntry(cfg, dir, e)
+		if !ok || (cfg.NoDirs && fi.IsDir()) {
 			continue
 		}
 		modTime := fi.ModTime()
 		if cfg.UTC {
 			modTime = modTime.UTC()
 		}
+		// url.URL prefixes "./" when a colon would otherwise read as a scheme.
+		href := url.URL{Path: e.Name()}
 		de := dirEntry{
 			Name:      e.Name(),
-			Href:      url.PathEscape(e.Name()),
+			Href:      href.String(),
 			IsDir:     fi.IsDir(),
-			IsSymlink: isSymlink,
+			IsSymlink: e.Type()&os.ModeSymlink != 0,
 			ModTime:   modTime.Format("2006-01-02 15:04"),
 		}
 		if fi.IsDir() {
 			if cfg.DirSize {
-				n := dirTotalSize(filepath.Join(dir, e.Name()), cfg.Symlinks)
+				n := dirTotalSize(filepath.Join(dir, e.Name()), cfg)
 				de.SizeBytes = n
 				de.Size = humanSize(n)
 			}
+			dirs = append(dirs, de)
 		} else {
 			de.SizeBytes = fi.Size()
 			de.Size = humanSize(fi.Size())
 			if i := strings.LastIndex(e.Name(), "."); i > 0 {
 				de.Ext = e.Name()[i+1:]
 			}
-		}
-		if fi.IsDir() {
-			dirs = append(dirs, de)
-		} else {
 			files = append(files, de)
 		}
 	}
-
-	slices.SortFunc(dirs, func(a, b dirEntry) int { return cmp.Compare(a.Name, b.Name) })
-	slices.SortFunc(files, func(a, b dirEntry) int { return cmp.Compare(a.Name, b.Name) })
 
 	data := listingData{
 		Path:        urlPath,
@@ -139,7 +130,9 @@ func serveDirectoryListing(w http.ResponseWriter, _ *http.Request, dir, urlPath 
 	}
 }
 
-func dirTotalSize(dir string, symlinks bool) int64 {
+// dirTotalSize sums the sizes of the files under dir that the listing would
+// show, so hidden entries neither count nor get walked.
+func dirTotalSize(dir string, cfg *Config) int64 {
 	var total int64
 	seen := make(map[string]bool)
 	var walk func(string)
@@ -154,16 +147,12 @@ func dirTotalSize(dir string, symlinks bool) int64 {
 			return
 		}
 		for _, e := range entries {
-			name := filepath.Join(path, e.Name())
-			if e.Type()&os.ModeSymlink != 0 && !symlinks {
-				continue
-			}
-			fi, err := os.Stat(name)
-			if err != nil {
+			fi, ok := visibleEntry(cfg, path, e)
+			if !ok {
 				continue
 			}
 			if fi.IsDir() {
-				walk(name)
+				walk(filepath.Join(path, e.Name()))
 			} else {
 				total += fi.Size()
 			}

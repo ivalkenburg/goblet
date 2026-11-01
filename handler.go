@@ -2,28 +2,29 @@ package main
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/gzhttp"
 )
 
 // buildHandler chains all configured middleware around the core file handler.
-// Order (outermost → innermost): logging → auth → [mux: SSE | gzip → cache → cors → inject → file]
+// Order (outermost → innermost): logging → cors → auth → [mux: SSE | gzip → cache → inject → file]
+// CORS sits outside auth because browsers never send credentials on preflights.
 func buildHandler(cfg *Config, r *reloader) http.Handler {
-	// Build the file-serving side of the chain.
 	var fileH http.Handler = &fileHandler{cfg: cfg}
 	if r != nil {
 		fileH = liveReloadMiddleware(fileH)
-	}
-	if cfg.CORS {
-		fileH = corsMiddleware(fileH)
 	}
 	fileH = cacheMiddleware(fileH, cfg)
 	if !cfg.NoGzip {
@@ -32,18 +33,19 @@ func buildHandler(cfg *Config, r *reloader) http.Handler {
 
 	// When live reload is active, route /_goblet/reload to the SSE handler
 	// so it bypasses gzip and cache (but still goes through auth and logging).
-	var h http.Handler
+	h := fileH
 	if r != nil {
 		mux := http.NewServeMux()
 		mux.Handle(reloadSSEPath, r)
 		mux.Handle("/", fileH)
 		h = mux
-	} else {
-		h = fileH
 	}
 
 	if cfg.Username != "" {
 		h = basicAuthMiddleware(h, cfg.Username, cfg.Password)
+	}
+	if cfg.CORS {
+		h = corsMiddleware(h)
 	}
 	if !cfg.Silent {
 		h = loggingMiddleware(h, cfg)
@@ -52,22 +54,15 @@ func buildHandler(cfg *Config, r *reloader) http.Handler {
 }
 
 // statusRecorder wraps http.ResponseWriter to capture the HTTP status code
-// and bytes written for access logging.
+// for access logging.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
-	size   int
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
-}
-
-func (r *statusRecorder) Write(b []byte) (int, error) {
-	n, err := r.ResponseWriter.Write(b)
-	r.size += n
-	return n, err
 }
 
 // Flush implements http.Flusher so streaming responses work through the recorder.
@@ -120,7 +115,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST, PUT, DELETE, PATCH")
-		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept")
+		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -157,7 +152,6 @@ func basicAuthMiddleware(next http.Handler, username, password string) http.Hand
 	})
 }
 
-// fileHandler is the core handler that serves files and directory listings.
 type fileHandler struct {
 	cfg *Config
 }
@@ -171,6 +165,22 @@ func matchesExclude(name string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// isHidden reports whether a single path component is hidden by --no-dotfiles
+// or --exclude.
+func isHidden(cfg *Config, name string) bool {
+	return (cfg.NoDotfiles && strings.HasPrefix(name, ".")) || matchesExclude(name, cfg.Exclude)
+}
+
+// isNotFound reports whether err from a path lookup means the path cannot
+// exist: a missing entry, a file used as a parent directory, or a name the
+// filesystem rejects.
+func isNotFound(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) ||
+		errors.Is(err, syscall.ENOTDIR) ||
+		errors.Is(err, syscall.ENAMETOOLONG) ||
+		errors.Is(err, syscall.EINVAL)
 }
 
 // fileInfo checks every component, since Lstat on the final path alone would
@@ -187,12 +197,13 @@ func fileInfo(cfg *Config, fsPath string) (os.FileInfo, bool, error) {
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	current := cfg.Root
+	var fi os.FileInfo
 	for i, part := range parts {
-		if (cfg.NoDotfiles && strings.HasPrefix(part, ".")) || matchesExclude(part, cfg.Exclude) {
+		if isHidden(cfg, part) {
 			return nil, true, nil
 		}
 		current = filepath.Join(current, part)
-		fi, err := os.Lstat(current)
+		fi, err = os.Lstat(current)
 		if err != nil {
 			return nil, false, err
 		}
@@ -208,11 +219,17 @@ func fileInfo(cfg *Config, fsPath string) (os.FileInfo, bool, error) {
 		if cfg.NoDirs && i < len(parts)-1 && fi.IsDir() {
 			return nil, true, nil
 		}
-		if i == len(parts)-1 {
-			return fi, false, nil
-		}
 	}
-	return nil, true, nil
+	return fi, false, nil
+}
+
+// servableFile returns the FileInfo for p if it is a visible file.
+func servableFile(cfg *Config, p string) (os.FileInfo, bool) {
+	fi, denied, err := fileInfo(cfg, p)
+	if denied || err != nil || fi.IsDir() {
+		return nil, false
+	}
+	return fi, true
 }
 
 func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -225,11 +242,11 @@ func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if os.IsNotExist(err) {
+	if isNotFound(err) {
 		// Try appending the default extension (e.g. /about → /about.html).
 		if fh.cfg.Ext != "" {
 			candidate := fsPath + "." + fh.cfg.Ext
-			if ci, blocked, err2 := fileInfo(fh.cfg, candidate); !blocked && err2 == nil && !ci.IsDir() {
+			if ci, ok := servableFile(fh.cfg, candidate); ok {
 				serveContent(w, r, candidate, ci)
 				return
 			}
@@ -237,13 +254,14 @@ func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// SPA fallback: serve root index.html so client-side routing works.
 		if fh.cfg.SPA {
 			idx := filepath.Join(fh.cfg.Root, "index.html")
-			if idxFi, blocked, err2 := fileInfo(fh.cfg, idx); !blocked && err2 == nil && !idxFi.IsDir() {
+			if idxFi, ok := servableFile(fh.cfg, idx); ok {
 				serveContent(w, r, idx, idxFi)
 				return
 			}
 		}
 		// Serve a custom 404 page if present in the root.
-		if p404 := filepath.Join(fh.cfg.Root, "404.html"); allowedFile(fh.cfg, p404) {
+		p404 := filepath.Join(fh.cfg.Root, "404.html")
+		if _, ok := servableFile(fh.cfg, p404); ok {
 			if content, err := os.ReadFile(p404); err == nil {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusNotFound)
@@ -267,21 +285,25 @@ func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Redirect bare directory paths to their trailing-slash form so that
-		// relative links in served HTML resolve correctly.
+		// relative links in served HTML resolve correctly. The target is built
+		// from the cleaned path: the raw one could start with "//", which
+		// browsers treat as another host.
 		if !strings.HasSuffix(r.URL.Path, "/") {
-			http.Redirect(w, r, r.URL.Path+"/", http.StatusMovedPermanently)
+			target := url.URL{Path: strings.TrimSuffix(urlPath, "/") + "/", RawQuery: r.URL.RawQuery}
+			http.Redirect(w, r, target.String(), http.StatusMovedPermanently)
 			return
 		}
 		// Prefer index.html over directory listing.
-		if idxFi, blocked, err2 := fileInfo(fh.cfg, filepath.Join(fsPath, "index.html")); !blocked && err2 == nil && !idxFi.IsDir() {
-			serveContent(w, r, filepath.Join(fsPath, "index.html"), idxFi)
+		idx := filepath.Join(fsPath, "index.html")
+		if idxFi, ok := servableFile(fh.cfg, idx); ok {
+			serveContent(w, r, idx, idxFi)
 			return
 		}
 		if fh.cfg.NoListing {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
-		serveDirectoryListing(w, r, fsPath, urlPath, fh.cfg)
+		serveDirectoryListing(w, fsPath, urlPath, fh.cfg)
 		return
 	}
 
@@ -289,9 +311,8 @@ func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveContent opens fsPath and delegates to http.ServeContent, which handles
-// Range requests (partial content / media seeking), ETags via Last-Modified,
-// and conditional GET (If-Modified-Since / If-None-Match).
-// fi must be the FileInfo for fsPath (already obtained by the caller).
+// Range requests (partial content / media seeking) and conditional GET via
+// Last-Modified. fi must be the FileInfo for fsPath.
 func serveContent(w http.ResponseWriter, r *http.Request, fsPath string, fi os.FileInfo) {
 	f, err := os.Open(fsPath)
 	if err != nil {
@@ -300,9 +321,4 @@ func serveContent(w http.ResponseWriter, r *http.Request, fsPath string, fi os.F
 	}
 	defer f.Close()
 	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
-}
-
-func allowedFile(cfg *Config, p string) bool {
-	fi, blocked, err := fileInfo(cfg, p)
-	return !blocked && err == nil && !fi.IsDir()
 }

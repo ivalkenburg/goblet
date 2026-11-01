@@ -7,7 +7,7 @@ Go static file server for local development (like npm `http-server`). Single `ma
 - `main.go`: cobra root command; `version` set via ldflags.
 - `config.go`: `Config` struct and all flag registration. New flag = field + flag here + README table.
 - `server.go`: `Start` validates config, binds, prints banner, serves, graceful shutdown on SIGINT/SIGTERM (5 s drain).
-- `handler.go`: middleware chain, outermost first: logging → auth → [mux: SSE | gzip → cache → cors → inject → file]. Basic auth compares in constant time.
+- `handler.go`: middleware chain, outermost first: logging → cors → auth → [mux: SSE | gzip → cache → inject → file]. Basic auth compares in constant time.
 - `listing.go` + `listing.html` (embedded): directory listing UI, breadcrumbs, `--dir-size`.
 - `reload.go`: `--watch`. fsnotify watcher (recursive, skips `--exclude` dirs) → SSE endpoint; script injected before `</body>` in 200 `text/html` responses.
 - Tests next to each file (`*_test.go`).

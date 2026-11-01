@@ -17,7 +17,7 @@ var rootCmd = &cobra.Command{
 	Long: `goblet serves a directory over HTTP, similar to the http-server npm package.
 
 By default it serves the current directory on port 8080 with directory
-listing, gzip compression, caching, and full request logging enabled.`,
+listing, gzip compression, and request logging enabled, and caching disabled.`,
 	Version:       version,
 	Args:          cobra.MaximumNArgs(1),
 	RunE:          run,
