@@ -536,3 +536,32 @@ func TestNewReloader_DotfilePatternIgnoresDotDirectory(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, ".hidden"), []byte("x"), 0644)
 	})
 }
+
+func TestInjectWriter_InjectsBeforeUppercaseBodyTag(t *testing.T) {
+	rr := httptest.NewRecorder()
+	rr.Header().Set("Content-Type", "text/html")
+	iw := &injectWriter{ResponseWriter: rr, tag: []byte("<script>x</script>")}
+	iw.Write([]byte("<HTML><BODY>hi</BODY></HTML>"))
+	iw.finalize()
+	if got := rr.Body.String(); got != "<HTML><BODY>hi<script>x</script></BODY></HTML>" {
+		t.Errorf("unexpected body %q", got)
+	}
+}
+
+func TestLastIndexFold(t *testing.T) {
+	cases := []struct {
+		s    string
+		want int
+	}{
+		{"", -1},
+		{"</body>", 0},
+		{"a</Body>b</BODY>", 9},
+		{"é</body>", 2},
+		{"</bod", -1},
+	}
+	for _, c := range cases {
+		if got := lastIndexFold([]byte(c.s), "</body>"); got != c.want {
+			t.Errorf("lastIndexFold(%q) = %d, want %d", c.s, got, c.want)
+		}
+	}
+}

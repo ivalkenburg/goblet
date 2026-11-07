@@ -137,11 +137,15 @@ func dirTotalSize(dir string, cfg *Config) int64 {
 	seen := make(map[string]bool)
 	var walk func(string)
 	walk = func(path string) {
-		real, err := filepath.EvalSymlinks(path)
-		if err != nil || seen[real] {
-			return
+		// Cycles are only possible through followed symlinks, so skip the
+		// per-directory EvalSymlinks otherwise.
+		if cfg.Symlinks {
+			real, err := filepath.EvalSymlinks(path)
+			if err != nil || seen[real] {
+				return
+			}
+			seen[real] = true
 		}
-		seen[real] = true
 		entries, err := os.ReadDir(path)
 		if err != nil {
 			return

@@ -236,7 +236,7 @@ func (w *injectWriter) finalize() {
 		return
 	}
 	body := w.buf.Bytes()
-	if i := bytes.LastIndex(body, []byte("</body>")); i >= 0 {
+	if i := lastIndexFold(body, "</body>"); i >= 0 {
 		out := make([]byte, 0, len(body)+len(w.tag))
 		out = append(out, body[:i]...)
 		out = append(out, w.tag...)
@@ -246,4 +246,16 @@ func (w *injectWriter) finalize() {
 		_, _ = w.ResponseWriter.Write(body)
 		_, _ = w.ResponseWriter.Write(w.tag)
 	}
+}
+
+// lastIndexFold is bytes.LastIndex with ASCII case folding, so "</BODY>" is
+// found too. Lowercasing the whole body would allocate and, for non-ASCII
+// bytes, could shift offsets.
+func lastIndexFold(s []byte, sep string) int {
+	for i := len(s) - len(sep); i >= 0; i-- {
+		if bytes.EqualFold(s[i:i+len(sep)], []byte(sep)) {
+			return i
+		}
+	}
+	return -1
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -155,14 +156,16 @@ func TestCacheMiddleware_PositiveSetsMaxAge(t *testing.T) {
 	}
 }
 
-func TestCacheMiddleware_ZeroSetsNoHeader(t *testing.T) {
+// With no Cache-Control at all, browsers apply heuristic caching based on
+// Last-Modified, so --cache 0 must send an explicit max-age=0.
+func TestCacheMiddleware_ZeroSetsMaxAgeZero(t *testing.T) {
 	cfg := &Config{Cache: 0}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	rr := httptest.NewRecorder()
 	cacheMiddleware(next, cfg).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
 
-	if got := rr.Header().Get("Cache-Control"); got != "" {
-		t.Errorf("expected no Cache-Control header for cache=0, got %q", got)
+	if got := rr.Header().Get("Cache-Control"); got != "public, max-age=0" {
+		t.Errorf("expected max-age=0 for cache=0, got %q", got)
 	}
 }
 
@@ -1076,5 +1079,136 @@ func TestBuildHandler_LoggingEnabledUnlessSilent(t *testing.T) {
 		if (out != "") != wantLog {
 			t.Errorf("Silent=%v: log output %q", silent, out)
 		}
+	}
+}
+
+// Hidden paths must be indistinguishable from missing ones, including the
+// custom 404 page.
+func TestFileHandler_HiddenPathUsesSameNotFoundAsMissing(t *testing.T) {
+	dir := newTestDir(t)
+	os.WriteFile(filepath.Join(dir, "404.html"), []byte("custom 404"), 0644)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=1"), 0644)
+	os.WriteFile(filepath.Join(dir, "app.log"), []byte("log"), 0644)
+	os.Mkdir(filepath.Join(dir, "sub"), 0755)
+	cfg := &Config{Root: dir, NoDotfiles: true, NoDirs: true, Exclude: []string{"*.log"}}
+	fh := &fileHandler{cfg: cfg}
+
+	missing := httptest.NewRecorder()
+	fh.ServeHTTP(missing, httptest.NewRequest("GET", "/missing", nil))
+	for _, p := range []string{"/.env", "/app.log", "/sub/", "/sub/x"} {
+		rr := httptest.NewRecorder()
+		fh.ServeHTTP(rr, httptest.NewRequest("GET", p, nil))
+		if rr.Code != missing.Code || rr.Body.String() != missing.Body.String() {
+			t.Errorf("%s: got %d %q, want %d %q", p, rr.Code, rr.Body.String(), missing.Code, missing.Body.String())
+		}
+	}
+}
+
+func TestFileHandler_HiddenPathFallsBackToSPA(t *testing.T) {
+	dir := newTestDir(t)
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("spa"), 0644)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=1"), 0644)
+	fh := &fileHandler{cfg: &Config{Root: dir, NoDotfiles: true, SPA: true}}
+	rr := httptest.NewRecorder()
+	fh.ServeHTTP(rr, httptest.NewRequest("GET", "/.env", nil))
+	if rr.Code != http.StatusOK || rr.Body.String() != "spa" {
+		t.Errorf("expected SPA index for hidden path, got %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestFileHandler_NonRegularFileIsNotFound(t *testing.T) {
+	dir := newTestDir(t)
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0644); err != nil {
+		t.Skipf("mkfifo unsupported: %v", err)
+	}
+	fh := &fileHandler{cfg: &Config{Root: dir}}
+	done := make(chan int, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		fh.ServeHTTP(rr, httptest.NewRequest("GET", "/pipe", nil))
+		done <- rr.Code
+	}()
+	select {
+	case code := <-done:
+		if code != http.StatusNotFound {
+			t.Errorf("expected 404 for FIFO, got %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request for a FIFO blocked")
+	}
+}
+
+func TestFileHandler_DefaultExtensionWithLeadingDot(t *testing.T) {
+	dir := newTestDir(t)
+	os.WriteFile(filepath.Join(dir, "about.html"), []byte("about"), 0644)
+	fh := &fileHandler{cfg: &Config{Root: dir, Ext: ".html"}}
+	rr := httptest.NewRecorder()
+	fh.ServeHTTP(rr, httptest.NewRequest("GET", "/about", nil))
+	if rr.Code != http.StatusOK || rr.Body.String() != "about" {
+		t.Errorf("expected about.html for --ext .html, got %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCORSMiddleware_ReflectsRequestedHeaders(t *testing.T) {
+	h := corsMiddleware(http.NotFoundHandler())
+	req := httptest.NewRequest("OPTIONS", "/", nil)
+	req.Header.Set("Access-Control-Request-Headers", "range, x-requested-with")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); got != "range, x-requested-with" {
+		t.Errorf("expected requested headers to be allowed, got %q", got)
+	}
+	if got := rr.Header().Get("Vary"); got != "Access-Control-Request-Headers" {
+		t.Errorf("expected Vary on requested headers, got %q", got)
+	}
+}
+
+// --watch must not change how ordinary paths are resolved.
+func TestBuildHandler_WatchDoesNotRedirectUncleanPaths(t *testing.T) {
+	dir := newTestDir(t)
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0644)
+	r := &reloader{clients: make(map[chan struct{}]struct{}), done: make(chan struct{})}
+	for _, rl := range []*reloader{nil, r} {
+		rr := httptest.NewRecorder()
+		buildHandler(&Config{Root: dir, Silent: true, NoGzip: true}, rl).ServeHTTP(rr, httptest.NewRequest("GET", "/x/../a.txt", nil))
+		if rr.Code != http.StatusOK || rr.Body.String() != "a" {
+			t.Errorf("watch=%v: got %d %q", rl != nil, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+type readFromRecorder struct {
+	*httptest.ResponseRecorder
+	used bool
+}
+
+func (w *readFromRecorder) ReadFrom(src io.Reader) (int64, error) {
+	w.used = true
+	return io.Copy(w.ResponseRecorder, src)
+}
+
+func TestStatusRecorder_ReadFromForwards(t *testing.T) {
+	inner := &readFromRecorder{ResponseRecorder: httptest.NewRecorder()}
+	rec := &statusRecorder{ResponseWriter: inner, status: http.StatusOK}
+	n, err := rec.ReadFrom(strings.NewReader("hello"))
+	if err != nil || n != 5 || !inner.used || inner.Body.String() != "hello" {
+		t.Errorf("ReadFrom not forwarded: n=%d err=%v used=%v body=%q", n, err, inner.used, inner.Body.String())
+	}
+
+	plain := httptest.NewRecorder()
+	rec = &statusRecorder{ResponseWriter: plain, status: http.StatusOK}
+	if n, err := rec.ReadFrom(strings.NewReader("hi")); err != nil || n != 2 || plain.Body.String() != "hi" {
+		t.Errorf("fallback copy failed: n=%d err=%v body=%q", n, err, plain.Body.String())
+	}
+}
+
+func TestBasicAuth_WrongUsernameAndPassword(t *testing.T) {
+	h := basicAuthMiddleware(http.NotFoundHandler(), "admin", "secret")
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("nope", "nope")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
 	}
 }

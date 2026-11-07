@@ -441,3 +441,77 @@ func TestRun_UsesPathArgument(t *testing.T) {
 		t.Fatalf("expected error naming the path, got %v", err)
 	}
 }
+
+func TestPrintBanner_IPv6AnyListsLocalAddresses(t *testing.T) {
+	addrs, err := localAddresses()
+	if err != nil || len(addrs) == 0 {
+		t.Skip("no non-loopback IPv4 address")
+	}
+	out := captureBanner(&Config{Root: ".", Port: 9090, Address: "::"}, "http")
+	if !strings.Contains(out, "http://"+addrs[0]+":9090") {
+		t.Errorf("banner for :: should list LAN addresses, got:\n%s", out)
+	}
+}
+
+func TestStart_WatchInjectsScriptAndServesSSE(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<html><body>hi</body></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t)
+	startErr := make(chan error, 1)
+	go func() {
+		startErr <- Start(&Config{Root: root, Port: port, Address: "127.0.0.1", Silent: true, Watch: true, Cache: -1})
+	}()
+
+	base := "http://127.0.0.1:" + strconv.Itoa(port)
+	var resp *http.Response
+	var err error
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if resp, err = http.Get(base + "/"); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), reloadSSEPath) {
+		t.Errorf("reload script not injected: %q", body)
+	}
+
+	sse, err := http.Get(base + reloadSSEPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ct := sse.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("unexpected SSE Content-Type %q", ct)
+	}
+
+	// Shutdown must close open SSE streams instead of waiting out the drain.
+	proc, _ := os.FindProcess(os.Getpid())
+	proc.Signal(syscall.SIGTERM)
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Errorf("expected clean shutdown, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Start did not return after SIGTERM with an open SSE stream")
+	}
+	sse.Body.Close()
+}
+
+func TestRun_DefaultsToCurrentDirectory(t *testing.T) {
+	saved := cfg
+	t.Cleanup(func() { cfg = saved })
+	cfg.Username = "only-user" // fails validation right after the root check
+	err := run(rootCmd, nil)
+	if cfg.Root != "." {
+		t.Errorf("expected root '.', got %q", cfg.Root)
+	}
+	if err == nil || !strings.Contains(err.Error(), "--username") {
+		t.Errorf("expected credential validation error, got %v", err)
+	}
+}

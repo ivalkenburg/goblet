@@ -604,3 +604,13 @@ func TestDirTotalSize_SkipsHiddenEntries(t *testing.T) {
 		t.Errorf("expected 15 with nothing hidden, got %d", got)
 	}
 }
+
+func TestDirTotalSize_NestedWithoutSymlinks(t *testing.T) {
+	dir := newListingDir(t)
+	os.MkdirAll(filepath.Join(dir, "a", "b"), 0755)
+	os.WriteFile(filepath.Join(dir, "a", "x"), make([]byte, 3), 0644)
+	os.WriteFile(filepath.Join(dir, "a", "b", "y"), make([]byte, 4), 0644)
+	if got := dirTotalSize(dir, &Config{}); got != 7 {
+		t.Errorf("expected 7, got %d", got)
+	}
+}

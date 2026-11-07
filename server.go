@@ -146,7 +146,7 @@ func browserHost(address string) string {
 func printBanner(cfg *Config, scheme string, port int) {
 	fmt.Printf("\ngoblet v%s — serving %q\n\n", version, cfg.Root)
 	fmt.Printf("  %s://%s\n", scheme, net.JoinHostPort(browserHost(cfg.Address), strconv.Itoa(port)))
-	if cfg.Address == "" || cfg.Address == "0.0.0.0" {
+	if cfg.Address == "" || cfg.Address == "0.0.0.0" || cfg.Address == "::" {
 		if addrs, err := localAddresses(); err == nil {
 			for _, addr := range addrs {
 				fmt.Printf("  %s://%s:%d\n", scheme, addr, port)

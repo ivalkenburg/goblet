@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -33,12 +34,17 @@ func buildHandler(cfg *Config, r *reloader) http.Handler {
 
 	// When live reload is active, route /_goblet/reload to the SSE handler
 	// so it bypasses gzip and cache (but still goes through auth and logging).
+	// A plain path check is used instead of http.ServeMux, which would
+	// redirect unclean paths and make --watch change how files are served.
 	h := fileH
 	if r != nil {
-		mux := http.NewServeMux()
-		mux.Handle(reloadSSEPath, r)
-		mux.Handle("/", fileH)
-		h = mux
+		h = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.URL.Path == reloadSSEPath {
+				r.ServeHTTP(w, req)
+				return
+			}
+			fileH.ServeHTTP(w, req)
+		})
 	}
 
 	if cfg.Username != "" {
@@ -73,6 +79,18 @@ func (r *statusRecorder) Flush() {
 }
 
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// ReadFrom forwards to the underlying writer so http.ServeContent can still
+// use sendfile when nothing between it and the connection rewrites the body.
+func (r *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := r.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(src)
+	}
+	return io.Copy(writerOnly{r.ResponseWriter}, src)
+}
+
+// writerOnly hides any ReadFrom method so io.Copy cannot recurse into it.
+type writerOnly struct{ io.Writer }
 
 func loggingMiddleware(next http.Handler, cfg *Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,10 +130,19 @@ func clientIP(r *http.Request) string {
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
+	const defaultHeaders = "Origin, Content-Type, Accept, Authorization"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST, PUT, DELETE, PATCH")
-		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization")
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", "*")
+		h.Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST, PUT, DELETE, PATCH")
+		// Allow whatever headers a preflight asks for (Range, X-Requested-With,
+		// ...) so custom request headers do not fail CORS.
+		if req := r.Header.Get("Access-Control-Request-Headers"); req != "" {
+			h.Set("Access-Control-Allow-Headers", req)
+			h.Add("Vary", "Access-Control-Request-Headers")
+		} else {
+			h.Set("Access-Control-Allow-Headers", defaultHeaders)
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -131,7 +158,7 @@ func cacheMiddleware(next http.Handler, cfg *Config) http.Handler {
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			w.Header().Set("Pragma", "no-cache")
 			w.Header().Set("Expires", "0")
-		case cfg.Cache > 0:
+		default:
 			w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", cfg.Cache))
 		}
 		next.ServeHTTP(w, r)
@@ -142,8 +169,11 @@ func basicAuthMiddleware(next http.Handler, username, password string) http.Hand
 	const realm = `Basic realm="goblet"`
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(u), []byte(username)) != 1 ||
-			subtle.ConstantTimeCompare([]byte(p), []byte(password)) != 1 {
+		// Compare both fields unconditionally so timing does not reveal
+		// whether the username alone was correct.
+		userOK := subtle.ConstantTimeCompare([]byte(u), []byte(username))
+		passOK := subtle.ConstantTimeCompare([]byte(p), []byte(password))
+		if !ok || userOK&passOK != 1 {
 			w.Header().Set("WWW-Authenticate", realm)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -223,10 +253,10 @@ func fileInfo(cfg *Config, fsPath string) (os.FileInfo, bool, error) {
 	return fi, false, nil
 }
 
-// servableFile returns the FileInfo for p if it is a visible file.
+// servableFile returns the FileInfo for p if it is a visible regular file.
 func servableFile(cfg *Config, p string) (os.FileInfo, bool) {
 	fi, denied, err := fileInfo(cfg, p)
-	if denied || err != nil || fi.IsDir() {
+	if denied || err != nil || !fi.Mode().IsRegular() {
 		return nil, false
 	}
 	return fi, true
@@ -238,38 +268,10 @@ func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	fsPath := filepath.Join(fh.cfg.Root, filepath.FromSlash(strings.TrimPrefix(urlPath, "/")))
 	fi, denied, err := fileInfo(fh.cfg, fsPath)
-	if denied {
-		http.NotFound(w, r)
-		return
-	}
-	if isNotFound(err) {
-		// Try appending the default extension (e.g. /about → /about.html).
-		if fh.cfg.Ext != "" {
-			candidate := fsPath + "." + fh.cfg.Ext
-			if ci, ok := servableFile(fh.cfg, candidate); ok {
-				serveContent(w, r, candidate, ci)
-				return
-			}
-		}
-		// SPA fallback: serve root index.html so client-side routing works.
-		if fh.cfg.SPA {
-			idx := filepath.Join(fh.cfg.Root, "index.html")
-			if idxFi, ok := servableFile(fh.cfg, idx); ok {
-				serveContent(w, r, idx, idxFi)
-				return
-			}
-		}
-		// Serve a custom 404 page if present in the root.
-		p404 := filepath.Join(fh.cfg.Root, "404.html")
-		if _, ok := servableFile(fh.cfg, p404); ok {
-			if content, err := os.ReadFile(p404); err == nil {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusNotFound)
-				w.Write(content) //nolint:errcheck
-				return
-			}
-		}
-		http.NotFound(w, r)
+	// Hidden paths get exactly the same response as missing ones, so the
+	// custom 404 page or SPA fallback cannot reveal that they exist.
+	if denied || isNotFound(err) {
+		fh.notFound(w, r, fsPath)
 		return
 	}
 	if err != nil {
@@ -281,7 +283,7 @@ func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// --no-dirs blocks subdirectory access but leaves the root listing
 		// intact so users still get a flat file index.
 		if fh.cfg.NoDirs && urlPath != "/" {
-			http.NotFound(w, r)
+			fh.notFound(w, r, fsPath)
 			return
 		}
 		// Redirect bare directory paths to their trailing-slash form so that
@@ -307,7 +309,45 @@ func (fh *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only regular files are served: opening a FIFO or device would block
+	// the request forever.
+	if !fi.Mode().IsRegular() {
+		fh.notFound(w, r, fsPath)
+		return
+	}
 	serveContent(w, r, fsPath, fi)
+}
+
+// notFound tries the fallbacks for a path that does not resolve to anything
+// servable: the default extension, the SPA index, then a custom 404 page.
+func (fh *fileHandler) notFound(w http.ResponseWriter, r *http.Request, fsPath string) {
+	// Try appending the default extension (e.g. /about → /about.html).
+	if ext := strings.TrimPrefix(fh.cfg.Ext, "."); ext != "" {
+		candidate := fsPath + "." + ext
+		if ci, ok := servableFile(fh.cfg, candidate); ok {
+			serveContent(w, r, candidate, ci)
+			return
+		}
+	}
+	// SPA fallback: serve root index.html so client-side routing works.
+	if fh.cfg.SPA {
+		idx := filepath.Join(fh.cfg.Root, "index.html")
+		if idxFi, ok := servableFile(fh.cfg, idx); ok {
+			serveContent(w, r, idx, idxFi)
+			return
+		}
+	}
+	// Serve a custom 404 page if present in the root.
+	p404 := filepath.Join(fh.cfg.Root, "404.html")
+	if _, ok := servableFile(fh.cfg, p404); ok {
+		if content, err := os.ReadFile(p404); err == nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write(content) //nolint:errcheck
+			return
+		}
+	}
+	http.NotFound(w, r)
 }
 
 // serveContent opens fsPath and delegates to http.ServeContent, which handles
