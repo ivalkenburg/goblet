@@ -60,6 +60,16 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract changelog entry
+        run: |
+          awk -v tag="$GITHUB_REF_NAME" '$1 == "##" { if (p) exit; p = ($2 == tag); next } p' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no entry for $GITHUB_REF_NAME"
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -68,4 +78,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: goblet-*
+          body_path: release-notes.md
           generate_release_notes: true

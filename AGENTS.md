@@ -28,5 +28,6 @@ go build -o goblet .
 
 ## Releasing
 
-1. Push a `vX.Y.Z` tag. `.github/workflows/release.yml` builds `goblet-{darwin,linux}-{amd64,arm64}` and `goblet-windows-amd64.exe` with `main.version=X.Y.Z` and creates the release.
-2. Update `Formula/goblet.rb` in `ivalkenburg/homebrew-tap`: version and the four darwin/linux sha256s.
+1. Add a `## vX.Y.Z` section to `CHANGELOG.md` (short user-facing bullets) and commit it. The release workflow publishes that section as the release notes and fails if it is missing.
+2. Push a `vX.Y.Z` tag. `.github/workflows/release.yml` builds `goblet-{darwin,linux}-{amd64,arm64}` and `goblet-windows-amd64.exe` with `main.version=X.Y.Z` and creates the release.
+3. Update `Formula/goblet.rb` in `ivalkenburg/homebrew-tap`: version and the four darwin/linux sha256s.
