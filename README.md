@@ -1,4 +1,6 @@
-# goblet
+<h1 align="center">
+  <img src="assets/wordmark.png" alt="goblet: a blue goblet logo with a terminal prompt beside the project name" width="420">
+</h1>
 
 A static file server for local development. Run it in a folder and that folder
 is on `http://localhost:8080`.
