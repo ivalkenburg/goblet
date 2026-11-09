@@ -26,6 +26,10 @@ go build -o goblet .
 - Symlinks are only followed with `--symlinks`, including in `--dir-size`.
 - Wrapped `ResponseWriter`s must forward `Flush` so SSE works through the chain.
 
+## Commits
+
+Use Conventional Commits: `<type>[optional scope]: <description>` (e.g. `feat:`, `fix:`, `docs:`, `chore:`).
+
 ## Releasing
 
 1. Add a `## vX.Y.Z` section to `CHANGELOG.md` (short user-facing bullets) and commit it. The release workflow publishes that section as the release notes and fails if it is missing.
