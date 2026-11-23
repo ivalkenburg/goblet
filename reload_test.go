@@ -281,6 +281,7 @@ func TestNewReloader_WatchesRootDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newReloader failed: %v", err)
 	}
+	defer r.shutdown()
 
 	ch := make(chan struct{}, 1)
 	r.mu.Lock()
@@ -309,6 +310,7 @@ func TestNewReloader_WatchesSubdirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newReloader failed: %v", err)
 	}
+	defer r.shutdown()
 
 	ch := make(chan struct{}, 1)
 	r.mu.Lock()
@@ -564,4 +566,74 @@ func TestLastIndexFold(t *testing.T) {
 			t.Errorf("lastIndexFold(%q) = %d, want %d", c.s, got, c.want)
 		}
 	}
+	if got := lastIndexFold([]byte("abc"), ""); got != 3 {
+		t.Errorf("lastIndexFold(\"abc\", \"\") = %d, want 3", got)
+	}
+}
+
+func TestLiveReloadMiddleware_HeadDoesNotInjectBody(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := liveReloadMiddleware(next)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest("HEAD", "/", nil))
+	if rr.Body.Len() != 0 {
+		t.Errorf("HEAD response should have empty body, got %q", rr.Body.String())
+	}
+}
+
+func TestInjectWriter_UppercaseContentTypeAndUnwrap(t *testing.T) {
+	rr := httptest.NewRecorder()
+	rr.Header().Set("Content-Type", "TEXT/HTML; charset=utf-8")
+	iw := &injectWriter{ResponseWriter: rr, tag: []byte("<script>x</script>")}
+	if iw.Unwrap() != rr {
+		t.Error("Unwrap did not return underlying ResponseWriter")
+	}
+	iw.WriteHeader(http.StatusOK)
+	iw.WriteHeader(http.StatusInternalServerError) // duplicate must be ignored
+	iw.Write([]byte("<body>hi</body>"))
+	iw.finalize()
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+	if got := rr.Body.String(); got != "<body>hi<script>x</script></body>" {
+		t.Errorf("unexpected body %q", got)
+	}
+}
+
+func TestReloader_ShutdownIsIdempotent(t *testing.T) {
+	r, err := newReloader(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.shutdown()
+	r.shutdown() // must not panic
+}
+
+func TestNewReloader_MissingRootReturnsError(t *testing.T) {
+	_, err := newReloader(filepath.Join(t.TempDir(), "does-not-exist"), nil)
+	if err == nil {
+		t.Fatal("expected error for missing root")
+	}
+}
+
+func TestNewReloader_IgnoresChmodEvents(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := newReloader(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.shutdown()
+
+	waitForNoBroadcast(t, r, make(chan struct{}, 1), func() {
+		_ = os.Chmod(f, 0600)
+	})
 }

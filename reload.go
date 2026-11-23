@@ -28,11 +28,12 @@ const liveReloadScript = `(function(){
 
 // reloader watches the filesystem and pushes reload signals to SSE clients.
 type reloader struct {
-	mu      sync.Mutex
-	clients map[chan struct{}]struct{}
-	watcher *fsnotify.Watcher
-	done    chan struct{} // closed by shutdown() to unblock all SSE handlers
-	exclude []string
+	mu       sync.Mutex
+	clients  map[chan struct{}]struct{}
+	watcher  *fsnotify.Watcher
+	done     chan struct{} // closed by shutdown() to unblock all SSE handlers
+	stopOnce sync.Once
+	exclude  []string
 }
 
 // newReloader starts an fsnotify watcher on root (recursively) and returns
@@ -63,7 +64,13 @@ func newReloader(root string, exclude []string) (*reloader, error) {
 
 func watchTree(w *fsnotify.Watcher, root string, exclude []string) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
+		if err != nil {
+			if path == root {
+				return err
+			}
+			return nil
+		}
+		if !d.IsDir() {
 			return nil
 		}
 		if path != root && matchesExclude(d.Name(), exclude) {
@@ -91,8 +98,9 @@ func (r *reloader) watch() {
 				continue
 			}
 			// Watch newly created directories so they are covered too.
+			// Use Lstat to match watchTree and avoid following symlinked dirs.
 			if event.Has(fsnotify.Create) {
-				if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+				if fi, err := os.Lstat(event.Name); err == nil && fi.IsDir() {
 					_ = watchTree(w, event.Name, r.exclude)
 				}
 			}
@@ -116,8 +124,10 @@ func (r *reloader) watch() {
 
 // shutdown unblocks all active SSE handlers and stops the file watcher.
 func (r *reloader) shutdown() {
-	close(r.done)
-	r.watcher.Close()
+	r.stopOnce.Do(func() {
+		close(r.done)
+		r.watcher.Close()
+	})
 }
 
 func (r *reloader) broadcast() {
@@ -170,11 +180,15 @@ func (r *reloader) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		case <-r.done:
 			return
 		case <-ch:
-			fmt.Fprint(w, "data: reload\n\n")
+			if _, err := fmt.Fprint(w, "data: reload\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-ping.C:
 			// Keep the connection alive through proxies.
-			fmt.Fprint(w, ": ping\n\n")
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}
@@ -185,6 +199,10 @@ func (r *reloader) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func liveReloadMiddleware(next http.Handler) http.Handler {
 	tag := []byte("<script>" + liveReloadScript + "</script>")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
 		iw := &injectWriter{ResponseWriter: w, tag: tag}
 		next.ServeHTTP(iw, r)
 		iw.finalize()
@@ -201,16 +219,19 @@ type injectWriter struct {
 }
 
 func (w *injectWriter) WriteHeader(code int) {
+	if w.started {
+		return
+	}
+	w.started = true
 	if code == http.StatusOK {
 		ct := w.ResponseWriter.Header().Get("Content-Type")
-		if strings.HasPrefix(ct, "text/html") {
+		if len(ct) >= len("text/html") && strings.EqualFold(ct[:len("text/html")], "text/html") {
 			w.inject = true
 			// Remove Content-Length; it will be wrong after injection.
 			w.ResponseWriter.Header().Del("Content-Length")
 		}
 	}
 	w.ResponseWriter.WriteHeader(code)
-	w.started = true
 }
 
 func (w *injectWriter) Write(b []byte) (int, error) {
@@ -230,6 +251,8 @@ func (w *injectWriter) Flush() {
 	}
 }
 
+func (w *injectWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // finalize writes the (possibly modified) buffer to the underlying writer.
 func (w *injectWriter) finalize() {
 	if !w.inject {
@@ -237,11 +260,9 @@ func (w *injectWriter) finalize() {
 	}
 	body := w.buf.Bytes()
 	if i := lastIndexFold(body, "</body>"); i >= 0 {
-		out := make([]byte, 0, len(body)+len(w.tag))
-		out = append(out, body[:i]...)
-		out = append(out, w.tag...)
-		out = append(out, body[i:]...)
-		_, _ = w.ResponseWriter.Write(out)
+		_, _ = w.ResponseWriter.Write(body[:i])
+		_, _ = w.ResponseWriter.Write(w.tag)
+		_, _ = w.ResponseWriter.Write(body[i:])
 	} else {
 		_, _ = w.ResponseWriter.Write(body)
 		_, _ = w.ResponseWriter.Write(w.tag)
@@ -252,8 +273,16 @@ func (w *injectWriter) finalize() {
 // found too. Lowercasing the whole body would allocate and, for non-ASCII
 // bytes, could shift offsets.
 func lastIndexFold(s []byte, sep string) int {
-	for i := len(s) - len(sep); i >= 0; i-- {
-		if bytes.EqualFold(s[i:i+len(sep)], []byte(sep)) {
+	if len(sep) == 0 {
+		return len(s)
+	}
+	sepBytes := []byte(sep)
+	first := sepBytes[0]
+	for i := len(s) - len(sepBytes); i >= 0; i-- {
+		if s[i] != first && (s[i]|0x20) != (first|0x20) {
+			continue
+		}
+		if bytes.EqualFold(s[i:i+len(sepBytes)], sepBytes) {
 			return i
 		}
 	}

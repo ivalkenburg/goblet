@@ -824,6 +824,7 @@ func captureStdout(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer r.Close()
 	os.Stdout = w
 	defer func() { os.Stdout = old }()
 	fn()
@@ -1210,5 +1211,86 @@ func TestBasicAuth_WrongUsernameAndPassword(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestStatusRecorder_IgnoresDuplicateWriteHeader(t *testing.T) {
+	rr := httptest.NewRecorder()
+	rec := &statusRecorder{ResponseWriter: rr, status: http.StatusOK}
+	rec.WriteHeader(http.StatusNotFound)
+	rec.WriteHeader(http.StatusInternalServerError)
+	if rec.status != http.StatusNotFound {
+		t.Errorf("expected first status 404, got %d", rec.status)
+	}
+
+	rr2 := httptest.NewRecorder()
+	rec2 := &statusRecorder{ResponseWriter: rr2, status: http.StatusOK}
+	rec2.Write([]byte("ok"))
+	rec2.WriteHeader(http.StatusInternalServerError)
+	if rec2.status != http.StatusOK {
+		t.Errorf("expected implicit 200 after Write, got %d", rec2.status)
+	}
+}
+
+func TestClientIP_XRealIPTrimsWhitespace(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Real-Ip", "  9.10.11.12  ")
+	if ip := clientIP(r); ip != "9.10.11.12" {
+		t.Errorf("expected trimmed IP 9.10.11.12, got %q", ip)
+	}
+}
+
+func TestFileHandler_Custom404Page_HeadOmitsBody(t *testing.T) {
+	dir := newTestDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "404.html"), []byte("<h1>Custom Not Found</h1>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fh := &fileHandler{cfg: &Config{Root: dir}}
+	rr := httptest.NewRecorder()
+	fh.ServeHTTP(rr, httptest.NewRequest("HEAD", "/missing.txt", nil))
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rr.Code)
+	}
+	if rr.Body.Len() != 0 {
+		t.Errorf("expected empty body for HEAD 404.html, got %q", rr.Body.String())
+	}
+}
+
+func TestFileHandler_BrokenSymlinkWithSymlinksEnabledReturns404(t *testing.T) {
+	dir := newTestDir(t)
+	makeSymlink(t, filepath.Join(dir, "missing-target"), filepath.Join(dir, "broken.txt"))
+
+	fh := &fileHandler{cfg: &Config{Root: dir, Symlinks: true}}
+	rr := httptest.NewRecorder()
+	fh.ServeHTTP(rr, httptest.NewRequest("GET", "/broken.txt", nil))
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for broken symlink, got %d", rr.Code)
+	}
+}
+
+func TestFileHandler_UnreadableParentDirReturns500(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := newTestDir(t)
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "file.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0755) })
+
+	fh := &fileHandler{cfg: &Config{Root: dir}}
+	rr := httptest.NewRecorder()
+	fh.ServeHTTP(rr, httptest.NewRequest("GET", "/locked/file.txt", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for unreadable parent directory, got %d", rr.Code)
 	}
 }

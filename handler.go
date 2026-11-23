@@ -63,12 +63,26 @@ func buildHandler(cfg *Config, r *reloader) http.Handler {
 // for access logging.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
+	if r.wroteHeader {
+		return
+	}
 	r.status = code
+	if code >= 200 {
+		r.wroteHeader = true
+	}
 	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if !r.wroteHeader {
+		r.wroteHeader = true
+	}
+	return r.ResponseWriter.Write(b)
 }
 
 // Flush implements http.Flusher so streaming responses work through the recorder.
@@ -83,6 +97,9 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 // ReadFrom forwards to the underlying writer so http.ServeContent can still
 // use sendfile when nothing between it and the connection rewrites the body.
 func (r *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
+	if !r.wroteHeader {
+		r.wroteHeader = true
+	}
 	if rf, ok := r.ResponseWriter.(io.ReaderFrom); ok {
 		return rf.ReadFrom(src)
 	}
@@ -117,9 +134,10 @@ func loggingMiddleware(next http.Handler, cfg *Config) http.Handler {
 
 func clientIP(r *http.Request) string {
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return strings.TrimSpace(strings.SplitN(fwd, ",", 2)[0])
+		first, _, _ := strings.Cut(fwd, ",")
+		return strings.TrimSpace(first)
 	}
-	if real := r.Header.Get("X-Real-Ip"); real != "" {
+	if real := strings.TrimSpace(r.Header.Get("X-Real-Ip")); real != "" {
 		return real
 	}
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -152,27 +170,31 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 func cacheMiddleware(next http.Handler, cfg *Config) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case cfg.Cache < 0:
+	if cfg.Cache < 0 {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			w.Header().Set("Pragma", "no-cache")
 			w.Header().Set("Expires", "0")
-		default:
-			w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", cfg.Cache))
-		}
+			next.ServeHTTP(w, r)
+		})
+	}
+	cacheControl := fmt.Sprintf("public, max-age=%d", cfg.Cache)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", cacheControl)
 		next.ServeHTTP(w, r)
 	})
 }
 
 func basicAuthMiddleware(next http.Handler, username, password string) http.Handler {
 	const realm = `Basic realm="goblet"`
+	wantUser := []byte(username)
+	wantPass := []byte(password)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
 		// Compare both fields unconditionally so timing does not reveal
 		// whether the username alone was correct.
-		userOK := subtle.ConstantTimeCompare([]byte(u), []byte(username))
-		passOK := subtle.ConstantTimeCompare([]byte(p), []byte(password))
+		userOK := subtle.ConstantTimeCompare([]byte(u), wantUser)
+		passOK := subtle.ConstantTimeCompare([]byte(p), wantPass)
 		if !ok || userOK&passOK != 1 {
 			w.Header().Set("WWW-Authenticate", realm)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -343,7 +365,9 @@ func (fh *fileHandler) notFound(w http.ResponseWriter, r *http.Request, fsPath s
 		if content, err := os.ReadFile(p404); err == nil {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusNotFound)
-			w.Write(content) //nolint:errcheck
+			if r.Method != http.MethodHead {
+				w.Write(content) //nolint:errcheck
+			}
 			return
 		}
 	}

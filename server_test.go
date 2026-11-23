@@ -177,6 +177,7 @@ func TestLocalAddresses_ReturnsIPv4(t *testing.T) {
 func captureBanner(cfg *Config, scheme string) string {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
+	defer r.Close()
 	os.Stdout = w
 	printBanner(cfg, scheme, cfg.Port)
 	w.Close()

@@ -333,7 +333,7 @@
             r.style.display = match ? "" : "none";
             if (match) visible++;
           });
-          noResults.style.display = q && visible === 0 ? "" : "none";
+          noResults.style.display = q && rows.length > 0 && visible === 0 ? "" : "none";
         });
 
         render();

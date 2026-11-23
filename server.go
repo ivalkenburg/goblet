@@ -71,12 +71,13 @@ func Start(cfg *Config) error {
 		r, err = newReloader(cfg.Root, watchExcludes(cfg))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: live reload disabled: %v\n", err)
-			cfg.Watch = false
 		}
 	}
 
 	if !cfg.Silent {
-		printBanner(cfg, scheme, port)
+		bannerCfg := *cfg
+		bannerCfg.Watch = r != nil
+		printBanner(&bannerCfg, scheme, port)
 	}
 
 	srv.Handler = buildHandler(cfg, r)
@@ -149,7 +150,7 @@ func printBanner(cfg *Config, scheme string, port int) {
 	if cfg.Address == "" || cfg.Address == "0.0.0.0" || cfg.Address == "::" {
 		if addrs, err := localAddresses(); err == nil {
 			for _, addr := range addrs {
-				fmt.Printf("  %s://%s:%d\n", scheme, addr, port)
+				fmt.Printf("  %s://%s\n", scheme, net.JoinHostPort(addr, strconv.Itoa(port)))
 			}
 		}
 	}

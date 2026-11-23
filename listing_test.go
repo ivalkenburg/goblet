@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -612,5 +613,45 @@ func TestDirTotalSize_NestedWithoutSymlinks(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a", "b", "y"), make([]byte, 4), 0644)
 	if got := dirTotalSize(dir, &Config{}); got != 7 {
 		t.Errorf("expected 7, got %d", got)
+	}
+}
+
+func TestServeDirectoryListing_HidesNonRegularFiles(t *testing.T) {
+	dir := newListingDir(t)
+	if err := syscall.Mkfifo(filepath.Join(dir, "myfifo"), 0644); err != nil {
+		t.Skipf("mkfifo unsupported: %v", err)
+	}
+	os.WriteFile(filepath.Join(dir, "regular.txt"), []byte("hello"), 0644)
+
+	rr := httptest.NewRecorder()
+	serveDirectoryListing(rr, dir, "/", &Config{})
+	body := rr.Body.String()
+	if strings.Contains(body, "myfifo") {
+		t.Error("non-regular file (FIFO) should not appear in listing")
+	}
+	if !strings.Contains(body, "regular.txt") {
+		t.Error("regular file should still appear in listing")
+	}
+	if got := dirTotalSize(dir, &Config{}); got != 5 {
+		t.Errorf("dirTotalSize should only count regular files, got %d", got)
+	}
+}
+
+func TestServeDirectoryListing_HeadRequest(t *testing.T) {
+	dir := newListingDir(t)
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi"), 0644)
+	srv := httptest.NewServer(buildHandler(&Config{Root: dir, Silent: true}, nil))
+	defer srv.Close()
+
+	resp, err := http.Head(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for HEAD listing, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("expected text/html Content-Type, got %q", ct)
 	}
 }

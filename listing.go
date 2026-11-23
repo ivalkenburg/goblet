@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -69,7 +70,10 @@ func visibleEntry(cfg *Config, dir string, e os.DirEntry) (os.FileInfo, bool) {
 	} else {
 		return nil, false
 	}
-	return fi, err == nil
+	if err != nil || (!fi.IsDir() && !fi.Mode().IsRegular()) {
+		return nil, false
+	}
+	return fi, true
 }
 
 func serveDirectoryListing(w http.ResponseWriter, dir, urlPath string, cfg *Config) {
@@ -125,7 +129,7 @@ func serveDirectoryListing(w http.ResponseWriter, dir, urlPath string, cfg *Conf
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if err := listingTmpl.Execute(w, data); err != nil {
+	if err := listingTmpl.Execute(w, data); err != nil && !errors.Is(err, http.ErrBodyNotAllowed) {
 		fmt.Fprintf(os.Stderr, "listing template error: %v\n", err)
 	}
 }
