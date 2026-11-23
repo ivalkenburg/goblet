@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.0.4
+
+- `HEAD` requests no longer append the live-reload script, write custom `404.html` bodies, or log template errors on directory listings.
+- Non-regular files (such as FIFOs and sockets) are excluded from directory listings and `--dir-size`, matching file serving.
+- `--watch` now reports an error if the root directory cannot be watched, avoids following newly created symlinked directories, exits SSE streams on write errors, and handles uppercase `Content-Type: text/html` headers.
+- Filtering an empty directory listing no longer shows "No matching entries." alongside "Empty directory.".
+- Avoid redundant per-request allocations in cache, basic auth, and live-reload HTML injection, and prevent duplicate `WriteHeader` calls from skewing logged status codes.
+
 ## v1.0.3
 
 - Hidden paths (`--exclude`, `--no-dotfiles`, `--no-dirs`) now get the same response as missing ones, including the custom `404.html` and SPA fallback, so their existence is not revealed.
